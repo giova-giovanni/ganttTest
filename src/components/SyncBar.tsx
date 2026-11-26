@@ -1,104 +1,85 @@
+import React from 'react';
 import {
-  askForControl,
   dismissLocalData,
+  dismissNotice,
   dismissSyncError,
-  continueReadOnly,
-  giveUpControl,
-  reload,
-  takeControl,
+  restoreValue,
   uploadLocalData,
   useStore,
+  type Notice,
 } from '../store';
-import { Modal, useT } from '../ui';
+import { PresenceDots, useOthers, useT } from '../ui';
 import { formatDateTime } from '../utils/notes';
+import { fieldLabel, fieldValue } from '../utils/fields';
 import type { TKey } from '../i18n';
-
-/** ora leggibile di quando l'altro utente ha aperto l'archivio */
-function timeOf(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
+import { ChangeLogDialog } from './ChangeLogDialog';
 
 /**
- * Barra di stato dell'archivio condiviso: dice sempre se si sta modificando o
- * si sta solo guardando, chi tiene il documento e quando è stato salvato.
+ * Barra di stato dell'archivio condiviso: chi è collegato, se le modifiche sono salvate,
+ * avvisi (valore sostituito da un altro utente, record eliminato) e registro delle modifiche.
  */
 export function SyncBar() {
-  const { sync, auth } = useStore();
+  const { sync, auth, data } = useStore();
   const { t } = useT();
+  const others = useOthers();
+  const [showLog, setShowLog] = React.useState(false);
 
   const shared = sync.mode === 'shared';
-  const writer = sync.role === 'writer';
-  // chi ha solo il livello «lettura» non può prendere il documento: inutile mostrargli i pulsanti
-  const mayWrite = auth.level !== 'lettura';
-  const lock = sync.lock;
-  const heldByOther = !!lock && lock.sessionId !== sync.identity?.sessionId && !lock.stale;
-
-  // richieste di modifica arrivate da altri utenti (solo chi sta scrivendo le vede)
-  const requests = writer && lock ? lock.requests.filter((r) => r.sessionId !== sync.identity?.sessionId) : [];
+  const readOnlyServer = sync.server?.readOnly ?? null;
+  const mayWrite = auth.level !== 'lettura' && !readOnlyServer;
+  const projectName = (id: string | null) => (id ? data.nodes.find((n) => n.id === id)?.name ?? '' : '');
+  const whoTitle = others
+    .map((p) => (p.project ? t('presence.onProject', { user: p.user, project: projectName(p.project) }) : p.user))
+    .join('\n');
 
   return (
     <>
-      <div className={'syncbar' + (writer && shared ? ' write' : '') + (shared && !writer ? ' read' : '')}>
-        <span className="sb-state">{shared ? (writer ? t('sync.write') : t('sync.readOnly')) : t('sync.local')}</span>
-
-        {shared && heldByOther && (
-          <span className="sb-who">{t('sync.heldBy', { user: lock!.user, host: lock!.host })}</span>
+      <div className={'syncbar' + (shared ? (mayWrite ? ' write' : ' read') : '')}>
+        <span className="sb-state">
+          {shared ? (sync.online ? t('sync.online') : t('sync.reconnecting')) : t('sync.local')}
+        </span>
+        {shared && sync.session && (
+          <span className="sb-who">
+            {sync.session.user}
+            {sync.session.guest ? ` (${t('login.guestBadge')})` : ''} · {t(`auth.level.${auth.level}` as TKey)}
+          </span>
         )}
-        {shared && writer && <span className="sb-who">{sync.info ? t(`sync.mode.${sync.info.mode}` as TKey) : ''}</span>}
         {!shared && <span className="sb-who">{t('sync.localHint')}</span>}
+        {shared && others.length > 0 && (
+          <span className="sb-who" title={whoTitle} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {t('sync.others')}: <PresenceDots people={others} />
+          </span>
+        )}
 
         <span className="sb-spacer" />
 
         {shared && sync.saving && <span className="sb-info">{t('sync.saving')}</span>}
-        {shared && !sync.saving && sync.pending && <span className="sb-info warn">{t('sync.pending')}</span>}
-        {shared && !sync.saving && !sync.pending && sync.savedAt && (
-          <span className="sb-info">{t('sync.saved', { d: formatDateTime(sync.savedAt) })}</span>
+        {shared && !sync.saving && sync.pending > 0 && (
+          <span className="sb-info warn">{t('sync.waiting', { n: sync.pending })}</span>
         )}
-
-        {!mayWrite && <span className="sb-info">{t('auth.readOnlyLevel')}</span>}
-
-        {shared && !writer && (
-          <>
-            <button className="btn sm" onClick={() => void reload()}>
-              {t('sync.reload')}
-            </button>
-            {!mayWrite ? null : heldByOther ? (
-              <button className="btn sm" onClick={() => void askForControl()}>
-                {t('sync.askControl')}
-              </button>
-            ) : (
-              <button className="btn sm primary" onClick={() => void takeControl(true)}>
-                {t('sync.takeControl')}
-              </button>
-            )}
-          </>
+        {shared && !sync.saving && sync.pending === 0 && (
+          <span className="sb-info">{sync.savedAt ? t('sync.saved', { d: formatDateTime(sync.savedAt) }) : t('sync.allSaved')}</span>
         )}
-        {shared && writer && (
-          <button className="btn sm" onClick={() => void giveUpControl()} title={t('sync.giveControl')}>
-            {t('sync.giveControl')}
+        {shared && auth.level === 'lettura' && <span className="sb-info">{t('auth.readOnlyLevel')}</span>}
+        {shared && (
+          <button className="btn sm" onClick={() => setShowLog(true)}>
+            {t('sync.log')}
           </button>
         )}
       </div>
 
-      {requests.length > 0 && (
-        <div className="syncnote">
-          {t('sync.requestFrom', { user: requests.map((r) => r.user).join(', ') })}
-          <button className="btn sm" onClick={() => void giveUpControl()}>
-            {t('sync.giveControl')}
-          </button>
+      {readOnlyServer && (
+        <div className="syncnote danger">
+          {t('sync.readOnlyServer', { host: readOnlyServer.host, url: readOnlyServer.url || '—' })}
         </div>
+      )}
+      {sync.server && !sync.server.health.ok && (
+        <div className="syncnote danger">{t('sync.diskError', { error: sync.server.health.error ?? '?' })}</div>
       )}
 
-      {sync.conflict && (
-        <div className="syncnote danger">
-          {t('sync.conflict')}
-          <button className="btn sm primary" onClick={() => void reload()}>
-            {t('sync.reload')}
-          </button>
-        </div>
-      )}
+      {sync.notices.map((n) => (
+        <NoticeRow key={n.id} notice={n} />
+      ))}
 
       {sync.localOnly && (
         <div className="syncnote">
@@ -114,62 +95,40 @@ export function SyncBar() {
 
       {sync.error && (
         <div className="toast err">
-          {t(sync.error as TKey)}
+          {t(sync.error)}
           <button className="ghost" onClick={dismissSyncError} title={t('btn.close')}>
             ✕
           </button>
         </div>
       )}
 
-      {sync.ask && <InUseDialog />}
+      {showLog && <ChangeLogDialog onClose={() => setShowLog(false)} />}
     </>
   );
 }
 
-/** dialogo di apertura quando l'archivio è già in uso da un altro utente */
-function InUseDialog() {
-  const { sync } = useStore();
-  const { t } = useT();
-  const lock = sync.lock;
-  const stale = !!lock?.stale;
-
+/** un avviso: testo, eventuale «Rimetti il mio valore», chiusura */
+function NoticeRow({ notice }: { notice: Notice }) {
+  const { data } = useStore();
+  const { t, lang } = useT();
+  const vars: Record<string, string | number> = { ...notice.vars };
+  if (notice.field) {
+    const f = notice.field;
+    vars.field = fieldLabel(lang, f.t, f.name);
+    vars.mine = fieldValue(lang, data, f.t, f.name, f.mine);
+    vars.theirs = fieldValue(lang, data, f.t, f.name, f.theirs);
+  }
   return (
-    <Modal
-      title={t('sync.inUseTitle')}
-      onClose={continueReadOnly}
-      maxWidth={520}
-      footer={
-        <>
-          <button className="btn" onClick={continueReadOnly}>
-            {t('sync.openReadOnly')}
-          </button>
-          {stale ? (
-            <button className="btn primary" onClick={() => void takeControl(true)}>
-              {t('sync.takeControl')}
-            </button>
-          ) : (
-            <button
-              className="btn primary"
-              onClick={() => {
-                void askForControl();
-                continueReadOnly();
-              }}
-            >
-              {t('sync.askControl')}
-            </button>
-          )}
-        </>
-      }
-    >
-      <p style={{ margin: '0 0 10px', lineHeight: 1.5 }}>
-        {t('sync.inUseBody', {
-          user: lock?.user ?? '?',
-          host: lock?.host ?? '?',
-          since: lock ? timeOf(lock.since) : '—',
-        })}
-      </p>
-      {stale && <p className="hint">{t('sync.inUseStale')}</p>}
-      {sync.savedBy && <p className="hint">{t('sync.lastSaveBy', { user: sync.savedBy })}</p>}
-    </Modal>
+    <div className="syncnote">
+      {t(notice.text, vars)}
+      {notice.restore && (
+        <button className="btn sm primary" onClick={() => restoreValue(notice)}>
+          {t('notice.restore')}
+        </button>
+      )}
+      <button className="btn sm" onClick={() => dismissNotice(notice.id)} title={t('btn.close')}>
+        ✕
+      </button>
+    </div>
   );
 }

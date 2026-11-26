@@ -15,8 +15,10 @@ GANTT_*
 # configurazione locale (può contenere password o percorsi di rete)
 gantt-config.json
 gantt-utenti.json
+gantt-utenti.prima-hash.json
 
 # test
+.test-tmp/
 test-results/
 playwright-report/
 tests/screenshots/

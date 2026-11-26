@@ -1,14 +1,93 @@
 import React from 'react';
-import { lockLevel, unlockLevel, useStore } from '../store';
+import { lockLevel, login, logout, unlockLevel, useStore } from '../store';
 import { IconLock, Modal, useT } from '../ui';
 import type { TKey } from '../i18n';
 
 /**
- * Sblocco del livello di accesso: chiunque può diventare amministratore,
- * ma deve conoscere la password scritta in `gantt-utenti.json`.
+ * Accesso all'archivio condiviso: compare all'apertura (o quando la sessione scade).
+ * Cosa chiede dipende da gantt-utenti.json: solo il nome, nome + password facoltativa
+ * (password di livello) oppure nome utente + password personale.
+ */
+export function AccessDialog() {
+  const { auth, ui, sync } = useStore();
+  const { t } = useT();
+  const [name, setName] = React.useState(ui.userName);
+  const [password, setPassword] = React.useState('');
+  const [error, setError] = React.useState<TKey | null>(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const account = auth.mode === 'account';
+  const go = async (guest = false) => {
+    if (busy) return;
+    if (!name.trim()) {
+      setError('login.nameRequired');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const r = await login(name, guest ? '' : password);
+    setBusy(false);
+    setPassword('');
+    if (!r.ok) setError(r.error ?? 'auth.wrong');
+  };
+
+  const intro: TKey = account ? 'login.introAccount' : auth.mode === 'livelli' ? 'login.introLevels' : 'login.introOpen';
+
+  return (
+    <Modal
+      title={t('login.title')}
+      onClose={() => {}}
+      maxWidth={460}
+      footer={
+        <>
+          <button className="btn primary" onClick={() => void go()} disabled={busy}>
+            {t('login.enter')}
+          </button>
+          {account && auth.ospiti && (
+            <button className="btn" onClick={() => void go(true)} disabled={busy} title={t('login.guestHint')}>
+              {t('login.guest')}
+            </button>
+          )}
+        </>
+      }
+    >
+      {sync.expired && <p className="hint">{t('login.expired')}</p>}
+      <p style={{ margin: '0 0 10px', lineHeight: 1.5 }}>{t(intro)}</p>
+      <div className="field">
+        <label>{account ? t('login.user') : t('login.name')}</label>
+        <input
+          type="text"
+          autoFocus
+          autoComplete="username"
+          value={name}
+          maxLength={80}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && void go()}
+        />
+      </div>
+      {auth.mode !== 'aperto' && (
+        <div className="field">
+          <label>{account ? t('auth.password') : t('login.passwordOptional')}</label>
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void go()}
+          />
+        </div>
+      )}
+      {error && <div className="io-err">{t(error)}</div>}
+    </Modal>
+  );
+}
+
+/**
+ * Livello di accesso (lucchetto in alto): con le password di livello si sblocca admin o
+ * modifica per questa sessione; con gli account personali il livello è quello dell'account.
  */
 export function LoginDialog({ onClose }: { onClose: () => void }) {
-  const { auth } = useStore();
+  const { auth, sync } = useStore();
   const { t } = useT();
   const [password, setPassword] = React.useState('');
   const [error, setError] = React.useState<string | null>(null);
@@ -26,6 +105,7 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
   };
 
   const levelName = (l: string) => t(`auth.level.${l}` as TKey);
+  const levels = auth.mode === 'livelli';
 
   return (
     <Modal
@@ -34,18 +114,31 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
       maxWidth={520}
       footer={
         <>
-          <button className="btn primary" onClick={() => void go()} disabled={!password || busy}>
-            {t('auth.unlock')}
-          </button>
-          {auth.level !== auth.autoLevel && (
+          {levels && (
+            <button className="btn primary" onClick={() => void go()} disabled={!password || busy}>
+              {t('auth.unlock')}
+            </button>
+          )}
+          {levels && auth.level !== auth.autoLevel && (
             <button
               className="btn"
               onClick={() => {
-                lockLevel();
+                void lockLevel();
                 onClose();
               }}
             >
               {t('auth.lock')}
+            </button>
+          )}
+          {sync.mode === 'shared' && (
+            <button
+              className="btn"
+              onClick={() => {
+                void logout();
+                onClose();
+              }}
+            >
+              {t('login.switch')}
             </button>
           )}
           <button className="btn" onClick={onClose}>
@@ -54,6 +147,7 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     >
+      {sync.session && <p style={{ margin: '0 0 8px' }}>{t('login.signedAs', { user: sync.session.user })}</p>}
       <div className="auth-now">
         <IconLock size={15} open={auth.level === 'admin'} />
         <span>
@@ -63,8 +157,9 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
       </div>
 
       {!auth.enabled && <p className="hint">{t('auth.disabled')}</p>}
+      {auth.mode === 'account' && <p className="hint">{t('login.accountLevel')}</p>}
 
-      {auth.enabled && (
+      {levels && (
         <>
           <div className="field">
             <label>{t('auth.password')}</label>
@@ -95,7 +190,6 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
         </tbody>
       </table>
       <p className="hint">{t('auth.fileHint')}</p>
-      {auth.file && <p className="path hint">{auth.file}</p>}
       {auth.who && (
         <p className="hint">
           {t('auth.thisPc')}: <b className="path">{auth.who}</b>

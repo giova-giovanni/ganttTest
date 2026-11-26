@@ -80,8 +80,10 @@ export function lastAutoBackupMode(): BackupMode | null {
 
 export function isAutoBackupDue(): boolean {
   const log = readLog();
-  if (!log) return true;
-  return (Date.now() - new Date(log.lastAt).getTime()) / 86400000 >= INTERVAL_DAYS;
+  const last = log ? new Date(log.lastAt).getTime() : NaN;
+  // registro assente o illeggibile: meglio un backup in più che nessun backup per sempre
+  if (!Number.isFinite(last)) return true;
+  return (Date.now() - last) / 86400000 >= INTERVAL_DAYS;
 }
 
 // ------------------------------------------------------------------ cartella scelta dall'utente
@@ -198,13 +200,18 @@ async function writeToFolder(dir: DirHandle, data: AppData): Promise<string> {
   return name;
 }
 
-/** Ripiego: il server locale scrive nella cartella `backups` del programma. */
-async function writeToServer(data: AppData): Promise<string | null> {
+/**
+ * Copia sul server, nella cartella dati/backups (solo amministratore). Il server usa i propri
+ * dati, non quelli del browser: il backup settimanale lo fa comunque da solo.
+ */
+async function writeToServer(): Promise<string | null> {
   try {
-    const res = await fetch('/api/backup', {
+    // indirizzo relativo come le altre chiamate (utils/api.ts): funziona anche quando
+    // il programma è pubblicato sotto un sotto-percorso, es. https://intranet/gantt/
+    const res = await fetch('api/backup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      body: '{}',
     });
     if (!res.ok) return null;
     const json = (await res.json()) as { ok: boolean; file?: string };
@@ -218,11 +225,12 @@ let inFlight = false;
 
 /**
  * Esegue il backup. `force` ignora l'intervallo di 7 giorni (pulsante «esegui adesso»),
- * `interactive` permette di chiedere il permesso sulla cartella (solo da un click).
+ * `interactive` permette di chiedere il permesso sulla cartella (solo da un click),
+ * `server` ripiega sulla copia fatta dal server se nel browser non c'è una cartella scelta.
  */
 export async function runAutoBackup(
   data: AppData,
-  opts: { force?: boolean; interactive?: boolean } = {},
+  opts: { force?: boolean; interactive?: boolean; server?: boolean } = {},
 ): Promise<BackupResult> {
   if (inFlight) return { done: false };
   if (!opts.force && !isAutoBackupDue()) return { done: false };
@@ -243,7 +251,8 @@ export async function runAutoBackup(
         return { done: false, needsPermission: true };
       }
     }
-    const file = await writeToServer(data);
+    if (!opts.server) return { done: false };
+    const file = await writeToServer();
     if (!file) return { done: false };
     writeLog({ lastAt: new Date().toISOString(), lastFile: file, mode: 'server' });
     return { done: true, file, mode: 'server' };

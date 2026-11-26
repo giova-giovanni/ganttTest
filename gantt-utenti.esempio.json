@@ -1,19 +1,21 @@
 {
-  "_come_si_usa": "Copia questo file come gantt-utenti.json accanto al programma. Senza il file tutti sono amministratori.",
-  "_livelli": "lettura = guarda e stampa · modifica = lavoro normale · admin = anche eliminare, svuotare e sostituire l'archivio",
-  "_pc": "Elenco dei computer che ottengono il livello da soli, senza password: nome del PC, utente, utente@PC oppure indirizzo IP. In Impostazioni > Accesso il programma scrive come ha riconosciuto questo computer: copia quella riga qui dentro.",
+  "_come_si_usa": "Copia questo file come gantt-utenti.json accanto al programma. Senza il file ognuno entra con il proprio nome ed è amministratore, come prima.",
+  "_livelli": "lettura = guarda e stampa · modifica = lavoro normale · admin = anche eliminare progetti e responsabili, ferie e permessi, svuotare e sostituire l'archivio",
+  "_utenti": "Account personali: ognuno entra con nome e password. Le password vanno salvate come hash: crea l'hash con «node tools/password.mjs \"la-password\"» e incollalo in \"password\". Una password in chiaro funziona ancora, ma il server avvisa.",
+  "_ospiti": "true = chi non ha un account può entrare in sola lettura scrivendo solo il proprio nome.",
+  "_sessione": "Dopo quante ore di lavoro (sessioneOre) o minuti di inattività (inattivitaMinuti) bisogna rientrare.",
 
   "attivo": true,
+  "utenti": [
+    { "nome": "Mario Rossi", "livello": "admin", "password": "scrypt$… (node tools/password.mjs)" },
+    { "nome": "Anna Bianchi", "livello": "modifica", "password": "scrypt$…" }
+  ],
+  "ospiti": false,
+  "sessioneOre": 10,
+  "inattivitaMinuti": 120,
+
+  "_senza_account": "In alternativa agli account (lascia \"utenti\" vuoto): nome libero e password di livello, come nelle versioni precedenti. \"pc\" = computer che ottengono il livello senza password (nome del PC, utente, utente@PC o indirizzo IP).",
   "predefinito": "modifica",
-
-  "admin": {
-    "password": "cambiami",
-    "pc": ["NOME-DEL-TUO-PC"]
-  },
-
-  "modifica": {
-    "attivo": false,
-    "password": "",
-    "pc": []
-  }
+  "admin": { "password": "", "pc": [] },
+  "modifica": { "attivo": false, "password": "", "pc": [] }
 }

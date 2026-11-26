@@ -72,10 +72,30 @@ export function loadConfig(argv = process.argv.slice(2)) {
   ).trim();
   const dataDir = isAbsolute(rawDir) || /^\\\\/.test(rawDir) ? resolve(rawDir) : resolve(APP_DIR, rawDir);
 
+  // true quando davanti c'è un proxy HTTPS sullo stesso PC (IIS, nginx, Caddy): solo allora si
+  // credono le intestazioni X-Forwarded-For / -Proto / -Host che il proxy aggiunge
+  const proxyRaw = arg(argv, 'proxy') ?? process.env.GANTT_PROXY ?? file.proxy;
+  const proxy = proxyRaw === true || ['1', 'true', 'si', 'sì', 'ja', 'yes'].includes(String(proxyRaw ?? '').toLowerCase());
+
+  // altri nomi con cui gli utenti raggiungono il server (es. "gantt.azienda.local"), oltre al nome
+  // del PC e ai suoi indirizzi: le richieste con un nome diverso vengono rifiutate
+  const nomiRaw = arg(argv, 'nomi') ?? process.env.GANTT_NOMI ?? file.nomi ?? [];
+  const nomi = (Array.isArray(nomiRaw) ? nomiRaw : String(nomiRaw).split(','))
+    .map((n) => String(n).trim().toLowerCase())
+    .filter(Boolean);
+
+  // file degli utenti: di norma accanto al programma, ma si può spostare (es. in una cartella
+  // leggibile solo dal servizio) con --utenti, GANTT_UTENTI o "utenti" in gantt-config.json
+  const rawUsers = String(arg(argv, 'utenti', 'users') ?? process.env.GANTT_UTENTI ?? file.utenti ?? 'gantt-utenti.json').trim();
+  const usersFile = isAbsolute(rawUsers) || /^\\\\/.test(rawUsers) ? resolve(rawUsers) : resolve(APP_DIR, rawUsers);
+
   return {
     appDir: APP_DIR,
     dataDir,
+    usersFile,
     port,
+    proxy,
+    nomi,
     mode, // 'locale' | 'rete'
     // in modalità locale si ascolta su tutte le interfacce di loopback (IPv4 + IPv6),
     // altrimenti il controllo di avvio su 127.0.0.1 fallisce quando "localhost" è IPv6

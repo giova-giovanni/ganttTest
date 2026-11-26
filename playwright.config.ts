@@ -4,6 +4,7 @@ import { defineConfig } from '@playwright/test';
 //  - "browser": l'app servita come sito statico (vite preview), senza server → dati nel localStorage
 //  - "server":  il server vero (server.mjs) con l'archivio su file, su una cartella temporanea
 // Prima volta: npx playwright install chromium
+// (oppure PW_CHANNEL=msedge / chrome per usare un browser già installato)
 const STATIC_PORT = 5198;
 const SERVER_PORT = 5199;
 
@@ -19,6 +20,7 @@ export default defineConfig({
     locale: 'it-IT',
     timezoneId: 'Europe/Rome',
     trace: 'off',
+    channel: process.env.PW_CHANNEL || undefined,
   },
   projects: [
     { name: 'browser', testMatch: /browser\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${STATIC_PORT}/` } },

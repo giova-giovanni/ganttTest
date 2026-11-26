@@ -1,4 +1,4 @@
-import { setUserName, useStore } from '../store';
+import { logout, setUserName, useStore } from '../store';
 import { Modal, useT } from '../ui';
 import { formatDateTime } from '../utils/notes';
 import type { TKey } from '../i18n';
@@ -8,6 +8,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const { ui, sync, auth } = useStore();
   const { t } = useT();
   const info = sync.info;
+  const shared = sync.mode === 'shared';
 
   return (
     <Modal
@@ -15,14 +16,32 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       maxWidth={560}
       footer={
-        <button className="btn primary" onClick={onClose}>
-          {t('btn.close')}
-        </button>
+        <>
+          {shared && (
+            <button
+              className="btn"
+              onClick={() => {
+                void logout();
+                onClose();
+              }}
+            >
+              {t('login.switch')}
+            </button>
+          )}
+          <button className="btn primary" onClick={onClose}>
+            {t('btn.close')}
+          </button>
+        </>
       }
     >
       <div className="field">
         <label>{t('sync.user')}</label>
-        <input type="text" value={ui.userName} onChange={(e) => setUserName(e.target.value)} />
+        {shared ? (
+          // nell'archivio condiviso il nome è quello dell'accesso (compare nel registro)
+          <input type="text" value={sync.session?.user ?? ''} readOnly />
+        ) : (
+          <input type="text" value={ui.userName} onChange={(e) => setUserName(e.target.value)} />
+        )}
         <div className="hint" style={{ marginTop: 4 }}>
           {t('sync.userHint')}
         </div>
@@ -34,36 +53,25 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <tr>
             <th>{t('sync.modeLabel')}</th>
             <td>
-              {sync.mode === 'shared' ? t('sync.shared') : t('sync.local')}
+              {shared ? t('sync.shared') : t('sync.local')}
               {info && ` · ${t(`sync.mode.${info.mode}` as TKey)}`}
             </td>
           </tr>
           {info && (
             <tr>
               <th>{t('sync.folder')}</th>
-              <td className="path">{info.dataDir}</td>
+              <td className="path">{info.dataDir ?? t('settings.pathsAdmin')}</td>
             </tr>
           )}
-          {info && (
+          {info?.configFile && (
             <tr>
               <th>gantt-config.json</th>
               <td className="path">{info.configFile}</td>
             </tr>
           )}
           <tr>
-            <th>{sync.role === 'writer' ? t('sync.write') : t('sync.readOnly')}</th>
-            <td>
-              {sync.lock && sync.lock.sessionId !== sync.identity?.sessionId
-                ? t('sync.heldBy', { user: sync.lock.user, host: sync.lock.host })
-                : t('sync.free')}
-            </td>
-          </tr>
-          <tr>
             <th>{t('sync.lastSave')}</th>
-            <td>
-              {sync.savedAt ? formatDateTime(sync.savedAt) : t('sync.never')}
-              {sync.savedBy ? ` · ${sync.savedBy}` : ''}
-            </td>
+            <td>{sync.savedAt ? formatDateTime(sync.savedAt) : t('sync.never')}</td>
           </tr>
         </tbody>
       </table>
@@ -81,13 +89,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <tr>
             <th>{t('auth.thisPc')}</th>
             <td className="path">{auth.who || '—'}</td>
-          </tr>
-          <tr>
-            <th>gantt-utenti.json</th>
-            <td className="path">
-              {auth.file || '—'}
-              {auth.file && !auth.exists ? ` · ${t('auth.fileMissing')}` : ''}
-            </td>
           </tr>
         </tbody>
       </table>

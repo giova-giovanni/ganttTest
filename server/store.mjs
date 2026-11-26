@@ -1,32 +1,20 @@
-// Archivio dei dati di Gantt Planner su file, con blocco in scrittura in stile Excel.
+// File dell'archivio di Gantt Planner (livello «disco»: lettura, scrittura sicura, copie).
 //
 // Nella cartella dati vivono:
-//   gantt-dati.json         i dati veri e propri (progetti, attività, persone, note)
-//   gantt-dati.bak.json     copia della versione precedente (rete di sicurezza)
-//   gantt-blocco.json       chi sta modificando adesso
+//   gantt-dati.json          i dati (progetti, attività, persone, assenze, note) + revisioni per record
+//   gantt-dati.bak.json      copia della versione precedente (rete di sicurezza)
+//   gantt-dati.pre-v2.json   copia fatta una volta sola prima del passaggio al formato multi-utente
+//   gantt-server.json        quale server sta usando la cartella (uno solo alla volta)
+//   registro/AAAA-MM.jsonl  registro delle modifiche: chi, quando, cosa (una riga per salvataggio)
 //   versioni/               storico automatico (una copia all'ora, ultime 30)
-//   backups/                backup settimanali (compatibile con la versione precedente)
-//
-// La cartella può stare su una cartella di rete condivisa: un solo utente alla volta
-// ottiene il blocco di scrittura, gli altri vedono i dati in sola lettura e ricevono
-// gli aggiornamenti appena chi scrive salva.
+//   backups/                backup settimanali (stesso formato dell'export JSON)
 
-import { constants } from 'node:fs';
-import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname, userInfo } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 const DATA_FILE = 'gantt-dati.json';
-const BAK_FILE = 'gantt-dati.bak.json';
-const LOCK_FILE = 'gantt-blocco.json';
-const VERSIONS_DIR = 'versioni';
-const BACKUPS_DIR = 'backups';
-
-/** dopo quanti millisecondi senza segnale di vita il blocco è considerato abbandonato */
-export const LOCK_TTL_MS = 75_000;
-/** ogni quanto il client deve dare un segnale di vita (usato anche dall'interfaccia) */
-export const HEARTBEAT_MS = 25_000;
-
 const MAX_VERSIONS = 30;
 const VERSION_EVERY_MS = 60 * 60 * 1000; // una copia di storico all'ora
 const MAX_BODY = 40 * 1024 * 1024;
@@ -36,13 +24,16 @@ let paths = null;
 
 export function configure(config) {
   cfg = config;
+  const dir = config.dataDir;
   paths = {
-    dir: config.dataDir,
-    data: join(config.dataDir, DATA_FILE),
-    bak: join(config.dataDir, BAK_FILE),
-    lock: join(config.dataDir, LOCK_FILE),
-    versions: join(config.dataDir, VERSIONS_DIR),
-    backups: join(config.dataDir, BACKUPS_DIR),
+    dir,
+    data: join(dir, DATA_FILE),
+    bak: join(dir, 'gantt-dati.bak.json'),
+    preV2: join(dir, 'gantt-dati.pre-v2.json'),
+    server: join(dir, 'gantt-server.json'),
+    journal: join(dir, 'registro'),
+    versions: join(dir, 'versioni'),
+    backups: join(dir, 'backups'),
   };
   return paths;
 }
@@ -50,6 +41,11 @@ export function configure(config) {
 export function dataPaths() {
   if (!paths) throw new Error('archivio non configurato');
   return paths;
+}
+
+export function config() {
+  if (!cfg) throw new Error('archivio non configurato');
+  return cfg;
 }
 
 export function serverIdentity() {
@@ -68,65 +64,115 @@ export function serverIdentity() {
   return { user, host };
 }
 
-async function ensureDirs() {
+export async function ensureDirs() {
   await mkdir(dataPaths().dir, { recursive: true });
 }
 
-const emptyData = () => ({ version: 4, nodes: [], people: [], absences: [], notes: [] });
+// ------------------------------------------------------------------ una scrittura alla volta
 
-function envelope(data, rev, savedAt, savedBy) {
-  return { kind: 'gantt-data', rev, savedAt, savedBy, data };
+// Le richieste arrivano in parallelo: le scritture su disco passano da una coda, così due
+// salvataggi non si scrivono sopra a vicenda (e su Windows il secondo rename non fallisce).
+/** @type {Promise<unknown>} */
+let queue = Promise.resolve();
+
+/**
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function exclusive(fn) {
+  const run = queue.then(fn);
+  queue = run.catch(() => {});
+  return run;
 }
 
-async function readJson(file) {
+// ------------------------------------------------------------------ lettura e scrittura file
+
+const stripBom = (text) => text.replace(/^﻿/, '');
+
+/**
+ * null = il file non esiste; eccezione = esiste ma non si legge o è rovinato.
+ * I due casi non vanno mai confusi: un archivio illeggibile NON è un archivio vuoto.
+ */
+export async function readJsonStrict(file) {
+  let raw;
   try {
-    const raw = await readFile(file, 'utf8');
-    return JSON.parse(raw.replace(/^﻿/, ''));
+    raw = await readFile(file, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+  const json = JSON.parse(stripBom(raw));
+  if (!json || typeof json !== 'object') throw new Error('contenuto non valido');
+  return json;
+}
+
+/** versione tollerante: qualunque problema vale come «file assente» */
+export async function readJson(file) {
+  try {
+    return await readJsonStrict(file);
   } catch {
     return null;
   }
 }
 
-// ------------------------------------------------------------------ dati
-
-/** Legge l'archivio. Se il file non esiste lo crea vuoto. */
-export async function readState() {
-  await ensureDirs();
-  let json = await readJson(dataPaths().data);
-  if (!json) {
-    // file mancante o illeggibile: si prova la copia di sicurezza prima di ripartire da zero
-    const bak = await readJson(dataPaths().bak);
-    if (bak && bak.data) {
-      json = bak;
-      console.error('GANTT_WARN=file dati illeggibile, usata la copia gantt-dati.bak.json');
-    }
+export function isJson(text) {
+  try {
+    JSON.parse(stripBom(text));
+    return true;
+  } catch {
+    return false;
   }
-  if (!json || typeof json !== 'object') {
-    const fresh = envelope(emptyData(), 0, new Date().toISOString(), null);
-    await writeFile(dataPaths().data, JSON.stringify(fresh, null, 2), 'utf8');
-    return { ...fresh, created: true };
-  }
-  // tollera anche un file che contiene direttamente i dati (backup rinominato a mano)
-  const data = json.data && typeof json.data === 'object' ? json.data : json;
-  return {
-    kind: 'gantt-data',
-    rev: Number.isFinite(json.rev) ? json.rev : 0,
-    savedAt: typeof json.savedAt === 'string' ? json.savedAt : null,
-    savedBy: typeof json.savedBy === 'string' ? json.savedBy : null,
-    data,
-  };
 }
 
-/** Solo i metadati: usato dal controllo periodico dei client in sola lettura. */
-export async function readMeta() {
-  const json = await readJson(dataPaths().data);
-  if (!json) return { rev: 0, savedAt: null, savedBy: null, empty: true };
-  return {
-    rev: Number.isFinite(json.rev) ? json.rev : 0,
-    savedAt: json.savedAt ?? null,
-    savedBy: json.savedBy ?? null,
-    empty: false,
-  };
+const RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/**
+ * Scrive un file temporaneo e lo rinomina sul file finale: se la rete cade a metà
+ * il file buono resta intatto. Il nome del temporaneo è casuale (mai dati del client).
+ * Su Windows il rename può fallire per un attimo se un antivirus o un indicizzatore
+ * tiene aperto il file: si riprova per circa un secondo prima di arrendersi.
+ */
+export async function replaceFile(target, text) {
+  const tmp = `${target}.${randomUUID()}.tmp`;
+  await writeFile(tmp, text, 'utf8');
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(tmp, target);
+      return;
+    } catch (err) {
+      if (!RETRY_CODES.has(err?.code) || attempt >= 10) {
+        await unlink(tmp).catch(() => {});
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
+    }
+  }
+}
+
+// ------------------------------------------------------------------ archivio
+
+/**
+ * Legge l'archivio, con la copia .bak come ripiego.
+ * `source`: 'main' | 'bak' | 'none' (nessun file: primo avvio).
+ * Se l'archivio esiste ma è illeggibile e non c'è una .bak buona lancia un'eccezione:
+ * far finta che sia vuoto vorrebbe dire cancellarlo al primo salvataggio.
+ */
+export async function readDataFile() {
+  let mainError = null;
+  try {
+    const json = await readJsonStrict(dataPaths().data);
+    if (json) return { json, source: 'main' };
+  } catch (err) {
+    mainError = err;
+  }
+  const bak = await readJson(dataPaths().bak);
+  if (bak && bak.data && typeof bak.data === 'object') {
+    if (mainError) console.error(`GANTT_WARN=file dati illeggibile (${mainError.message}), usata la copia gantt-dati.bak.json`);
+    return { json: bak, source: 'bak' };
+  }
+  if (mainError) throw new Error(`archivio ${DATA_FILE} illeggibile: ${mainError.message}`);
+  return { json: null, source: 'none' };
 }
 
 async function writeVersionIfDue(text) {
@@ -150,156 +196,43 @@ async function writeVersionIfDue(text) {
 }
 
 /**
- * Salva i dati. Scrive prima un file temporaneo e poi lo rinomina: se la rete
- * cade a metà scrittura il file buono resta intatto.
- * `baseRev` è la revisione da cui parte il client: se nel frattempo qualcun altro
- * ha salvato, il salvataggio viene rifiutato invece di sovrascrivere il lavoro altrui.
+ * Scrive l'archivio completo (busta con dati e revisioni). La versione precedente va in
+ * .bak solo se è leggibile: un file rovinato non deve prendere il posto della copia buona.
  */
-export async function writeState(data, { sessionId, who, baseRev }) {
-  await ensureDirs();
-  const current = await readMeta();
-  if (Number.isFinite(baseRev) && !current.empty && baseRev !== current.rev) {
-    return { ok: false, error: 'conflict', rev: current.rev, savedBy: current.savedBy };
-  }
-  const rev = (current.rev ?? 0) + 1;
-  const text = JSON.stringify(envelope(data, rev, new Date().toISOString(), who), null, 2);
-  const tmp = `${dataPaths().data}.${sessionId || 'tmp'}.tmp`;
-
-  // copia di sicurezza della versione precedente
-  const previous = await readFile(dataPaths().data, 'utf8').catch(() => null);
-  if (previous) await writeFile(dataPaths().bak, previous, 'utf8').catch(() => {});
-
-  await writeFile(tmp, text, 'utf8');
-  await rename(tmp, dataPaths().data);
-  await writeVersionIfDue(text);
-  return { ok: true, rev };
+export function writeSnapshot(text) {
+  return exclusive(async () => {
+    await ensureDirs();
+    const previous = await readFile(dataPaths().data, 'utf8').catch(() => null);
+    if (previous && isJson(previous)) await writeFile(dataPaths().bak, previous, 'utf8').catch(() => {});
+    await replaceFile(dataPaths().data, text);
+    await writeVersionIfDue(text);
+  });
 }
 
-// ------------------------------------------------------------------ blocco
+// ------------------------------------------------------------------ backup settimanale
 
-function lockFromJson(json) {
-  if (!json || typeof json !== 'object' || !json.sessionId) return null;
-  const beat = typeof json.beat === 'string' ? json.beat : json.since;
-  const age = Date.now() - new Date(beat ?? 0).getTime();
-  return {
-    sessionId: String(json.sessionId),
-    user: String(json.user ?? '?'),
-    host: String(json.host ?? '?'),
-    since: String(json.since ?? beat ?? new Date().toISOString()),
-    beat: String(beat ?? new Date().toISOString()),
-    requests: Array.isArray(json.requests) ? json.requests.slice(0, 10) : [],
-    yielded: !!json.yielded,
-    stale: !Number.isFinite(age) || age > LOCK_TTL_MS,
-    ageMs: Number.isFinite(age) ? age : Number.MAX_SAFE_INTEGER,
-  };
-}
-
-export async function readLock() {
-  return lockFromJson(await readJson(dataPaths().lock));
-}
-
-async function writeLock(lock) {
-  await ensureDirs();
-  const tmp = `${dataPaths().lock}.${lock.sessionId}.tmp`;
-  await writeFile(tmp, JSON.stringify(lock, null, 2), 'utf8');
-  await rename(tmp, dataPaths().lock);
-}
-
-/** creazione esclusiva: fallisce se il file esiste già (operazione atomica anche in rete) */
-async function createLockExclusive(lock) {
-  await ensureDirs();
-  let handle = null;
-  try {
-    handle = await open(dataPaths().lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
-    await handle.writeFile(JSON.stringify(lock, null, 2), 'utf8');
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await handle?.close().catch(() => {});
-  }
-}
-
-/**
- * Chiede il blocco di scrittura.
- *  - libero o abbandonato (nessun segnale di vita da 75 s) → concesso
- *  - occupato → risposta 'busy' con i dati di chi lo tiene
- *  - `force` → subentra comunque (l'interfaccia lo propone solo su blocco abbandonato)
- */
-export async function acquireLock({ sessionId, user, host, force = false }) {
-  const now = new Date().toISOString();
-  const mine = { sessionId, user, host, since: now, beat: now, requests: [], yielded: false };
-
-  const existing = await readLock();
-  if (!existing) {
-    if (await createLockExclusive(mine)) return { ok: true, lock: lockFromJson(mine) };
-    // qualcun altro ha vinto la corsa per un soffio
-    const other = await readLock();
-    if (other && other.sessionId !== sessionId && !other.stale) return { ok: false, reason: 'busy', lock: other };
-  } else if (existing.sessionId === sessionId) {
-    // stessa sessione: si aggiorna il segnale di vita e l'eventuale nuovo nome utente
-    const next = { ...existing, user, host, beat: now, yielded: false };
-    await writeLock(next);
-    return { ok: true, lock: lockFromJson(next) };
-  } else if (!existing.stale && !existing.yielded && !force) {
-    return { ok: false, reason: 'busy', lock: existing };
-  }
-
-  await writeLock(mine);
-  return { ok: true, lock: lockFromJson(mine), takenOver: true };
-}
-
-/** segnale di vita: conferma che chi scrive è ancora al lavoro */
-export async function beatLock(sessionId) {
-  const lock = await readLock();
-  if (!lock) return { ok: false, reason: 'lost' };
-  if (lock.sessionId !== sessionId) return { ok: false, reason: 'lost', lock };
-  const next = { ...lock, beat: new Date().toISOString() };
-  await writeLock(next);
-  return { ok: true, lock: lockFromJson(next) };
-}
-
-export async function releaseLock(sessionId) {
-  const lock = await readLock();
-  if (!lock || lock.sessionId !== sessionId) return { ok: false };
-  await rm(dataPaths().lock, { force: true }).catch(() => {});
-  return { ok: true };
-}
-
-/** un utente in sola lettura chiede a chi sta scrivendo di lasciargli il posto */
-export async function requestControl({ sessionId, user, host }) {
-  const lock = await readLock();
-  if (!lock) return { ok: true, free: true };
-  if (lock.sessionId === sessionId) return { ok: true, mine: true };
-  const requests = lock.requests.filter((r) => r.sessionId !== sessionId);
-  requests.push({ sessionId, user, host, at: new Date().toISOString() });
-  await writeLock({ ...lock, requests });
-  return { ok: true, lock: lockFromJson({ ...lock, requests }) };
-}
-
-/** chi scrive cede il posto: il blocco resta marcato come "libero al primo che arriva" */
-export async function yieldControl(sessionId) {
-  const lock = await readLock();
-  if (!lock || lock.sessionId !== sessionId) return { ok: false };
-  await rm(dataPaths().lock, { force: true }).catch(() => {});
-  return { ok: true };
-}
-
-// ------------------------------------------------------------------ backup
-
-const BACKUP_NAME_RE = /^GANTT_backup_auto_\d{4}-\d{2}-\d{2}\.json$/;
+const BACKUP_NAME_RE = /^GANTT_backup_auto_(\d{4}-\d{2}-\d{2})\.json$/;
 const MAX_AUTO_BACKUPS = 20;
 
-export async function writeAutoBackup(data) {
-  const dir = dataPaths().backups;
-  await mkdir(dir, { recursive: true });
-  const file = `GANTT_backup_auto_${new Date().toISOString().slice(0, 10)}.json`;
-  await writeFile(join(dir, file), JSON.stringify(data, null, 2), 'utf8');
-  const all = (await readdir(dir)).filter((f) => BACKUP_NAME_RE.test(f)).sort();
-  await Promise.all(
-    all.slice(0, Math.max(0, all.length - MAX_AUTO_BACKUPS)).map((f) => unlink(join(dir, f)).catch(() => {})),
-  );
-  return file;
+/** data (AAAA-MM-GG) dell'ultimo backup settimanale presente, o null */
+export async function lastAutoBackupDay() {
+  const files = await readdir(dataPaths().backups).catch(() => []);
+  const days = files.map((f) => BACKUP_NAME_RE.exec(f)?.[1]).filter(Boolean).sort();
+  return days[days.length - 1] ?? null;
+}
+
+export function writeAutoBackup(data) {
+  return exclusive(async () => {
+    const dir = dataPaths().backups;
+    await mkdir(dir, { recursive: true });
+    const file = `GANTT_backup_auto_${new Date().toISOString().slice(0, 10)}.json`;
+    await replaceFile(join(dir, file), JSON.stringify(data, null, 2));
+    const all = (await readdir(dir)).filter((f) => BACKUP_NAME_RE.test(f)).sort();
+    await Promise.all(
+      all.slice(0, Math.max(0, all.length - MAX_AUTO_BACKUPS)).map((f) => unlink(join(dir, f)).catch(() => {})),
+    );
+    return file;
+  });
 }
 
 // ------------------------------------------------------------------ utilità HTTP
@@ -320,9 +253,4 @@ export function readBody(req, limit = MAX_BODY) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
-}
-
-export function config() {
-  if (!cfg) throw new Error('archivio non configurato');
-  return cfg;
 }

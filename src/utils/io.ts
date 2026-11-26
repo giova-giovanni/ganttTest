@@ -121,9 +121,14 @@ export function buildTasksCsv(data: AppData, lang: Lang, o: ExportOptions): stri
 }
 
 // nell'elenco dei responsabili non compare il conteggio delle assenze:
-// è un dato personale e sta solo nella schermata Ferie e permessi
+// è un dato personale e sta solo nella schermata Ferie e permessi.
+// Attività e ore hanno lo stesso perimetro della schermata Responsabili: niente attività
+// annullate né progetti archiviati, e le ore sono quelle del carico di lavoro.
 export function buildPeopleCsv(data: AppData, lang: Lang): string {
   const computed = computeAll(data.nodes);
+  const archived = new Set(roots(data.nodes).filter((r) => r.archived).map((r) => r.id));
+  const rootNames = Object.fromEntries(roots(data.nodes).map((r) => [r.id, r.name]));
+  const { totals } = computeLoad(data.nodes, computed, rootNames, buildAbsenceMap(data.absences), archived);
   const rows: CsvRow[] = [
     [
       translate(lang, 'people.name'),
@@ -136,14 +141,12 @@ export function buildPeopleCsv(data: AppData, lang: Lang): string {
   ];
   for (const p of data.people) {
     let tasks = 0;
-    let hours = 0;
     for (const n of data.nodes) {
       const c = computed[n.id];
-      if (!c || c.hasChildren || n.assigneeId !== p.id || c.status === 'CANCELLED') continue;
+      if (!c || c.hasChildren || n.assigneeId !== p.id || c.status === 'CANCELLED' || archived.has(c.rootId)) continue;
       tasks += 1;
-      hours += n.hours ?? 0;
     }
-    rows.push([p.name, p.role, formatNumber(capacityOf(p)), String(tasks), formatNumber(hours), p.color]);
+    rows.push([p.name, p.role, formatNumber(capacityOf(p)), String(tasks), formatNumber(totals[p.id] ?? 0), p.color]);
   }
   return toCsv(rows);
 }
@@ -405,7 +408,7 @@ const FIELD_SYNONYMS: Record<string, string[]> = {
   end: ['fine', 'datafine', 'al', 'ende', 'endtermin', 'enddatum', 'end', 'scadenza', 'termin', 'faelligkeit', 'bis', 'enddate', 'deadline'],
   hours: ['ore', 'oreprev', 'orepreviste', 'orepianificate', 'stunden', 'geplantestd', 'geplantestunden', 'aufwand', 'hours', 'arbeit', 'work', 'h'],
   assignee: ['responsabile', 'verantwortlich', 'verantwortlicher', 'assignee', 'owner', 'bearbeiter', 'zustaendig', 'zustandig', 'ressource', 'ressourcennamen', 'risorsa', 'persona', 'person'],
-  notes: ['note', 'notizen', 'notes', 'bemerkung', 'bemerkungen', 'commento', 'kommentar', 'comment'],
+  notes: ['note', 'nota', 'notizen', 'notiz', 'notes', 'bemerkung', 'bemerkungen', 'commento', 'kommentar', 'comment'],
   role: ['ruolo', 'rolle', 'role', 'funzione', 'funktion'],
   capacity: ['oregiorno', 'oreal giorno', 'stdtag', 'stundentag', 'kapazitat', 'capacita', 'capacity', 'hoursperday'],
   color: ['colore', 'farbe', 'color'],
@@ -419,7 +422,9 @@ function mapHeaders(header: CsvRow): { columns: ColumnInfo[]; index: Record<stri
     const norm = normalizeHeader(h);
     let field: string | null = null;
     for (const [key, syns] of Object.entries(FIELD_SYNONYMS)) {
-      if (syns.includes(norm) || syns.some((s) => norm.startsWith(s) && norm.length <= s.length + 4)) {
+      // «Ore (h)» → ore: l'inizio basta, ma solo per sinonimi di almeno 3 lettere,
+      // altrimenti «Altro» diventerebbe «Al» (data di fine) e «Idea» la colonna ID
+      if (syns.includes(norm) || syns.some((s) => s.length >= 3 && norm.startsWith(s) && norm.length <= s.length + 4)) {
         field = key;
         break;
       }
@@ -462,6 +467,25 @@ function detectKind(index: Record<string, number>): ImportKind {
 const emptyData = (): AppData => ({ version: 4, nodes: [], people: [], absences: [], notes: [] });
 
 /**
+ * I file della cartella dati (gantt-dati.json, gantt-dati.bak.json, versioni/*.json) tengono
+ * i dati dentro una «busta» { kind, rev, savedAt, savedBy, data }: si apre la busta.
+ */
+function unwrapData(parsed: unknown): Partial<AppData> {
+  if (Array.isArray(parsed)) return { nodes: parsed as TaskNode[] };
+  const obj = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
+  if (!Array.isArray(obj.nodes) && obj.data && typeof obj.data === 'object') return obj.data as Partial<AppData>;
+  return obj as Partial<AppData>;
+}
+
+const sameText = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** numero di struttura WBS / Gliederung: «1» → 0, «1.2» → 1, «1.2.3» → 2 */
+function outlineDepth(raw: string): number {
+  const s = raw.trim().replace(/\.$/, '');
+  return /^\d+(\.\d+)*$/.test(s) ? s.split('.').length - 1 : 0;
+}
+
+/**
  * Analizza il contenuto di un file (CSV o JSON) e prepara i dati da importare,
  * senza modificare nulla: l'utente vede l'anteprima e poi conferma.
  */
@@ -481,9 +505,7 @@ export function analyzeImport(text: string, filename: string, existing: AppData,
   // ---- JSON (backup completo)
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
-      const parsed = JSON.parse(trimmed);
-      const raw = Array.isArray(parsed) ? { nodes: parsed } : parsed;
-      const data = migrate(raw);
+      const data = migrate(unwrapData(JSON.parse(trimmed)));
       if (!data.nodes.length && !data.people.length && !data.absences.length) {
         return { ...base, kind: 'backup', errorKey: 'io.errorEmpty' };
       }
@@ -593,6 +615,9 @@ export function analyzeImport(text: string, filename: string, existing: AppData,
   const parsedRows: Parsed[] = [];
   let unknownStatus = 0;
   let badDates = 0;
+  // colonna WBS / Gliederung (MS Project): numeri di struttura «1.2.3», non livelli «1, 2, 3»
+  const outlineColumn =
+    index.level !== undefined && /^(wbs|gliederung(?!sebene))/.test(normalizeHeader(rows[0][index.level] ?? ''));
 
   for (const r of body) {
     const rawName = r[index.name] ?? '';
@@ -601,7 +626,9 @@ export function analyzeImport(text: string, filename: string, existing: AppData,
     if (!name) continue;
 
     let level = 0;
-    if (index.level !== undefined) {
+    if (index.level !== undefined && outlineColumn) {
+      level = outlineDepth(r[index.level] ?? '');
+    } else if (index.level !== undefined) {
       const lv = parseNumber(r[index.level] ?? '');
       level = lv && lv >= 1 ? Math.round(lv) - 1 : 0;
     } else {
@@ -644,15 +671,23 @@ export function analyzeImport(text: string, filename: string, existing: AppData,
   if (!parsedRows.length) return { ...base, kind, columns, errorKey: 'io.errorEmpty' };
 
   // --- ricostruzione della gerarchia
+  // livelli normalizzati in modo che il minimo diventi 0 (servono anche con gli ID, per le righe senza)
+  const minLevel = Math.min(...parsedRows.map((p) => p.level));
+  for (const p of parsedRows) p.level -= minLevel;
+
   const useIds = index.id !== undefined && index.parentId !== undefined && parsedRows.some((p) => p.srcId && p.srcParent);
   if (useIds) {
     const bySrc = new Map(parsedRows.filter((p) => p.srcId).map((p) => [p.srcId, p.node.id]));
-    for (const p of parsedRows) p.node.parentId = p.srcParent ? bySrc.get(p.srcParent) ?? null : null;
+    // le righe aggiunte a mano in Excel non hanno ID: per loro vale il livello
+    // (colonna Livello o rientro del nome), altrimenti diventerebbero progetti a sé
+    const stack: string[] = [];
+    for (const p of parsedRows) {
+      if (p.srcParent) p.node.parentId = bySrc.get(p.srcParent) ?? null;
+      else p.node.parentId = p.level > 0 ? stack[p.level - 1] ?? null : null;
+      stack[p.level] = p.node.id;
+      stack.length = p.level + 1;
+    }
   } else {
-    // livelli: normalizzati in modo che il minimo diventi 0
-    const minLevel = Math.min(...parsedRows.map((p) => p.level));
-    for (const p of parsedRows) p.level -= minLevel;
-
     const hasProject = index.project !== undefined && parsedRows.some((p) => p.project);
     const projectIds = new Map<string, string>();
     const stack: string[] = [];
@@ -662,6 +697,14 @@ export function analyzeImport(text: string, filename: string, existing: AppData,
       if (hasProject) {
         const key = p.project || (lang === 'de' ? 'Ohne Projekt' : 'Senza progetto');
         let pid = projectIds.get(key);
+        if (!pid && p.level === 0 && sameText(p.name, key)) {
+          // la riga È il progetto (export di Gantt Planner senza le colonne ID): niente contenitore doppio
+          projectIds.set(key, p.node.id);
+          p.node.parentId = null;
+          stack.length = 0;
+          stack[0] = p.node.id;
+          continue;
+        }
         if (!pid) {
           const projectNode: TaskNode = {
             id: uid(),
@@ -768,8 +811,8 @@ function pickColor(i: number): string {
 /** compatibilità con la versione precedente */
 export function parseImport(text: string): AppData | null {
   try {
-    const parsed = JSON.parse(text) as AppData;
-    if (!parsed || !Array.isArray(parsed.nodes)) return null;
+    const parsed = unwrapData(JSON.parse(text));
+    if (!Array.isArray(parsed.nodes)) return null;
     return migrate(parsed);
   } catch {
     return null;

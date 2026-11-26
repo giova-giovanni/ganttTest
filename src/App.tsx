@@ -11,8 +11,8 @@ import { PrintDialog } from './components/PrintDialog';
 import { PrintDocument, type PrintOptions } from './components/PrintDocument';
 import { SyncBar } from './components/SyncBar';
 import { SettingsDialog } from './components/SettingsDialog';
-import { LoginDialog } from './components/LoginDialog';
-import { canRedo, canUndo, redo, setUi, undo, useStore } from './store';
+import { AccessDialog, LoginDialog } from './components/LoginDialog';
+import { canRedo, canUndo, redo, reportPresence, setUi, undo, useStore } from './store';
 import { IconLock, useT } from './ui';
 import { runAutoBackup, runAutoBackupIfDue } from './utils/backup';
 import { pageRule, usePrintWhenReady } from './utils/print';
@@ -20,7 +20,7 @@ import { translate, type TKey } from './i18n';
 import type { Lang, Page } from './types';
 
 export default function App() {
-  const { data, ui, auth } = useStore();
+  const { data, ui, auth, sync } = useStore();
   const { t, lang } = useT();
   const [showIo, setShowIo] = React.useState(false);
   const [showPrint, setShowPrint] = React.useState(false);
@@ -34,6 +34,11 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', ui.theme);
     document.documentElement.lang = ui.lang;
   }, [ui.theme, ui.lang]);
+
+  // gli altri vedono su quale pagina e su quale progetto si sta lavorando
+  React.useEffect(() => {
+    reportPresence({ page: ui.page, project: ui.page === 'project' ? ui.selectedProjectId : null });
+  }, [ui.page, ui.selectedProjectId, sync.session?.id]);
 
   // backup automatico settimanale: si controlla all'avvio e poi una volta al giorno
   const latest = React.useRef({ data, lang });
@@ -193,6 +198,7 @@ export default function App() {
         </div>
       )}
 
+      {sync.needLogin && <AccessDialog />}
       {showIo && <IoDialog onClose={() => setShowIo(false)} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
       {showLogin && <LoginDialog onClose={() => setShowLogin(false)} />}

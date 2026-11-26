@@ -18,49 +18,19 @@ function normalizeRaw(text: string): string {
   return text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
 }
 
-/** Riconosce il separatore contando le occorrenze fuori dalle virgolette. */
-export function detectDelimiter(text: string): string {
-  const candidates = [';', '\t', ',', '|'];
-  const sample = normalizeRaw(text).split('\n').slice(0, 20).join('\n');
-  let best = ';';
-  let bestScore = -1;
-  for (const d of candidates) {
-    let count = 0;
-    let inQuotes = false;
-    for (let i = 0; i < sample.length; i++) {
-      const ch = sample[i];
-      if (ch === '"') inQuotes = !inQuotes;
-      else if (!inQuotes && ch === d) count++;
-    }
-    if (count > bestScore) {
-      bestScore = count;
-      best = d;
-    }
-  }
-  return bestScore > 0 ? best : ';';
-}
-
 /**
- * Parser CSV conforme a RFC 4180 con qualche tolleranza in più.
- * Gestisce virgolette raddoppiate (`""`) e valori che contengono a capo.
+ * Cuore del parser (RFC 4180 con qualche tolleranza in più): virgolette raddoppiate (`""`),
+ * valori su più righe. Le virgolette aprono una cella solo se ne sono il primo carattere:
+ * in «Tubo 2" acciaio» restano testo e non si mangiano il resto del file.
  */
-export function parseCsv(text: string, delimiter?: string): CsvRow[] {
-  let raw = normalizeRaw(text);
-  // Excel accetta una prima riga "sep=;" per forzare il separatore: la si onora e rimuove
-  let forced: string | undefined;
-  const sepMatch = /^sep=(.)\n/i.exec(raw);
-  if (sepMatch) {
-    forced = sepMatch[1];
-    raw = raw.slice(sepMatch[0].length);
-  }
-  const d = delimiter ?? forced ?? detectDelimiter(raw);
-
+function parseRecords(raw: string, d: string, limit = Infinity): CsvRow[] {
   const rows: CsvRow[] = [];
   let row: CsvRow = [];
   let field = '';
   let inQuotes = false;
+  let quoted = false; // la cella corrente è iniziata con le virgolette
 
-  for (let i = 0; i < raw.length; i++) {
+  for (let i = 0; i < raw.length && rows.length < limit; i++) {
     const ch = raw[i];
     if (inQuotes) {
       if (ch === '"') {
@@ -71,26 +41,68 @@ export function parseCsv(text: string, delimiter?: string): CsvRow[] {
       } else field += ch;
       continue;
     }
-    if (ch === '"') {
+    if (ch === '"' && field === '' && !quoted) {
       inQuotes = true;
+      quoted = true;
     } else if (ch === d) {
       row.push(field);
       field = '';
+      quoted = false;
     } else if (ch === '\n') {
       row.push(field);
       rows.push(row);
       row = [];
       field = '';
+      quoted = false;
     } else {
       field += ch;
     }
   }
-  if (field !== '' || row.length) {
+  if (rows.length < limit && (field !== '' || row.length)) {
     row.push(field);
     rows.push(row);
   }
+  return rows;
+}
+
+const notBlank = (r: CsvRow) => r.some((c) => c.trim() !== '');
+
+/**
+ * Riconosce il separatore: vince quello che divide le prime righe in un numero di colonne
+ * costante (e > 1). Contare i caratteri non basta: in un file «;» salvato da Excel le
+ * virgole dei decimali e dei testi sono spesso più dei punti e virgola.
+ */
+export function detectDelimiter(text: string): string {
+  const raw = normalizeRaw(text);
+  let best = ';';
+  let bestScore = 0;
+  for (const d of [';', '\t', ',', '|']) {
+    const rows = parseRecords(raw, d, 30).filter(notBlank);
+    const width = rows[0]?.length ?? 0;
+    if (width < 2) continue;
+    const consistent = rows.filter((r) => r.length === width).length;
+    const score = consistent * 1000 + width; // prima la coerenza tra le righe, poi le colonne
+    if (score > bestScore) {
+      bestScore = score;
+      best = d;
+    }
+  }
+  return best;
+}
+
+/** Legge un CSV: separatore indicato, oppure riga `sep=` di Excel, oppure riconosciuto. */
+export function parseCsv(text: string, delimiter?: string): CsvRow[] {
+  let raw = normalizeRaw(text);
+  // Excel accetta una prima riga "sep=;" per forzare il separatore: la si onora e rimuove
+  let forced: string | undefined;
+  const sepMatch = /^sep=(.)\n/i.exec(raw);
+  if (sepMatch) {
+    forced = sepMatch[1];
+    raw = raw.slice(sepMatch[0].length);
+  }
+  const d = delimiter ?? forced ?? detectDelimiter(raw);
   // scarta le righe completamente vuote
-  return rows.filter((r) => r.some((c) => c.trim() !== ''));
+  return parseRecords(raw, d).filter(notBlank);
 }
 
 // ------------------------------------------------------------------ scrittura
@@ -169,7 +181,8 @@ export function parseCsvDate(raw: string): string | null {
   if (/^\d{4,5}([.,]\d+)?$/.test(s)) {
     const serial = parseNumber(s);
     if (serial !== null && serial > 25000 && serial < 82000) {
-      const d = new Date(EXCEL_EPOCH + Math.round(serial) * 86400000);
+      // la parte decimale è l'ora del giorno (0,75 = 18:00): non deve spostare la data
+      const d = new Date(EXCEL_EPOCH + Math.floor(serial) * 86400000);
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
     }
   }

@@ -1,9 +1,9 @@
 import React from 'react';
 import { translate, type TKey } from './i18n';
 import type { Lang, Person, Status } from './types';
-import type { Level } from './utils/api';
+import type { Level, Presence } from './utils/api';
 import { STATUS_COLORS } from './utils/tree';
-import { useStore } from './store';
+import { canEditState, useStore } from './store';
 
 export function useT() {
   const { ui } = useStore();
@@ -15,13 +15,48 @@ export function useT() {
 }
 
 /**
- * true quando l'utente può modificare i dati: nell'archivio condiviso solo chi
- * tiene il blocco di scrittura, e solo se il livello di accesso lo consente.
+ * true quando l'utente può modificare i dati: lo consentono il livello di accesso e il
+ * server (nell'archivio condiviso tutti scrivono insieme, nessuno blocca gli altri).
  */
 export function useCanEdit(): boolean {
-  const { sync, auth } = useStore();
-  if (auth.level === 'lettura') return false;
-  return sync.mode === 'browser' || (sync.role === 'writer' && !sync.conflict);
+  return canEditState(useStore());
+}
+
+/** gli altri utenti collegati adesso (uno per persona, anche se ha più schede aperte) */
+export function useOthers(): Presence[] {
+  const { sync } = useStore();
+  return React.useMemo(() => {
+    const mine = sync.session?.id;
+    const byUser = new Map<string, Presence>();
+    for (const p of sync.presence) {
+      if (p.sid === mine) continue;
+      const prev = byUser.get(p.sid);
+      // tra più schede della stessa persona conta quella che sta modificando qualcosa
+      if (!prev || (!prev.node && !prev.note && (p.node || p.note))) byUser.set(p.sid, p);
+    }
+    return [...byUser.values()];
+  }, [sync.presence, sync.session?.id]);
+}
+
+/** pallini con le iniziali di chi è presente */
+export function PresenceDots({ people, size = 18, max = 6 }: { people: Presence[]; size?: number; max?: number }) {
+  if (!people.length) return null;
+  const shown = people.slice(0, max);
+  return (
+    <span className="presence-dots" style={{ display: 'inline-flex', gap: 2, alignItems: 'center' }}>
+      {shown.map((p) => (
+        <span
+          key={p.sid}
+          className="avatar"
+          title={p.user}
+          style={{ background: p.color, width: size, height: size, flexBasis: size, fontSize: size * 0.45 }}
+        >
+          {initials(p.user)}
+        </span>
+      ))}
+      {people.length > max && <small style={{ marginLeft: 2 }}>+{people.length - max}</small>}
+    </span>
+  );
 }
 
 /** livello di accesso attuale (senza gantt-utenti.json è sempre «admin») */

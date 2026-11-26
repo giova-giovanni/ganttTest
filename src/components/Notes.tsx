@@ -1,7 +1,7 @@
 import React from 'react';
 import type { Note, TaskNode } from '../types';
-import { addNote, deleteNote, toggleNotePinned, updateNote } from '../store';
-import { useCanEdit, useT } from '../ui';
+import { addNote, deleteNote, reportPresence, toggleNotePinned, updateNote } from '../store';
+import { useCanEdit, useOthers, useT } from '../ui';
 import { formatDateTime, notesOf, parseTags } from '../utils/notes';
 import { pathOf } from '../utils/tree';
 import { translate } from '../i18n';
@@ -17,12 +17,16 @@ export function RichText({
   readOnly,
   placeholder,
   minHeight = 90,
+  onFocus,
+  onBlur,
 }: {
   value: string;
   onChange: (html: string) => void;
   readOnly?: boolean;
   placeholder?: string;
   minHeight?: number;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }) {
   const ref = React.useRef<HTMLDivElement | null>(null);
   const mine = React.useRef(value); // ultimo valore scritto da noi: evita di riscrivere il campo mentre si digita
@@ -97,7 +101,11 @@ export function RichText({
         suppressContentEditableWarning
         data-placeholder={placeholder ?? ''}
         onInput={() => push()}
-        onBlur={() => push(true)}
+        onFocus={onFocus}
+        onBlur={() => {
+          push(true);
+          onBlur?.();
+        }}
         // l'incolla arriva come testo semplice: niente stili o immagini da altre pagine
         onPaste={(e) => {
           if (readOnly) return;
@@ -126,20 +134,37 @@ export function NoteCard({
   onGoTo?: (nodeId: string) => void;
 }) {
   const { t } = useT();
-  const canEdit = useCanEdit();
+  const canWrite = useCanEdit();
   const [tagsDraft, setTagsDraft] = React.useState(note.tags.join(', '));
   React.useEffect(() => setTagsDraft(note.tags.join(', ')), [note.id, note.tags]);
+
+  // una nota la scrive una persona alla volta: gli altri la vedono cambiare dal vivo
+  const [writingHere, setWritingHere] = React.useState(false);
+  const others = useOthers();
+  const writer = writingHere ? undefined : others.find((p) => p.note === note.id);
+  const canEdit = canWrite && !writer;
+  const focusIn = () => {
+    setWritingHere(true);
+    reportPresence({ note: note.id });
+  };
+  const focusOut = () => {
+    setWritingHere(false);
+    reportPresence({ note: null });
+  };
 
   const path = showPath ? pathOf(nodes, note.nodeId).filter(Boolean) : [];
 
   return (
-    <div className={'note' + (note.pinned ? ' pinned' : '')}>
+    <div className={'note' + (note.pinned ? ' pinned' : '')} style={writer ? { boxShadow: `inset 3px 0 0 ${writer.color}` } : undefined}>
+      {writer && <div className="hint">{t('presence.writingNote', { user: writer.user })}</div>}
       <div className="note-head">
         <input
           className="note-title"
           value={note.title}
           readOnly={!canEdit}
           placeholder={t('notes.untitled')}
+          onFocus={focusIn}
+          onBlur={focusOut}
           onChange={(e) => updateNote(note.id, { title: e.target.value.slice(0, 200) })}
         />
         <button
@@ -171,6 +196,8 @@ export function NoteCard({
         readOnly={!canEdit}
         placeholder={t('notes.placeholder')}
         onChange={(html) => updateNote(note.id, { body: html })}
+        onFocus={focusIn}
+        onBlur={focusOut}
       />
 
       <div className="note-foot">

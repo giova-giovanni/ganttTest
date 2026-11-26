@@ -1,92 +1,161 @@
 /**
- * Dialogo con il server di Gantt Planner (archivio condiviso).
+ * Dialogo con il server di Gantt Planner (archivio condiviso, più utenti insieme).
  *
- * Quando il programma è servito da server.mjs (npm start / npm run dev) queste chiamate rispondono e i dati
- * vivono in un file, eventualmente su una cartella di rete. Se invece la pagina viene
- * aperta senza server (doppio clic su dist/index.html) tutte le chiamate falliscono in
- * silenzio e il programma torna a salvare nel browser: nessuna funzione si rompe.
+ * Se la pagina viene aperta senza server (doppio clic su dist/index.html) le chiamate
+ * falliscono e il programma lavora nel browser come le versioni precedenti.
  */
 import type { AppData } from '../types';
+import type { Op, RecordKind } from '../../shared/ops.mjs';
 
-export interface LockInfo {
-  sessionId: string;
-  user: string;
-  host: string;
-  since: string;
-  beat: string;
-  requests: { sessionId: string; user: string; host: string; at: string }[];
-  yielded: boolean;
-  stale: boolean;
-  ageMs: number;
+/** livelli di accesso, dal più basso al più alto */
+export type Level = 'lettura' | 'modifica' | 'admin';
+/** come si entra: senza controllo, con le password di livello, con account personali */
+export type AccessMode = 'aperto' | 'livelli' | 'account';
+
+export interface ServerStatus {
+  health: { ok: boolean; error: string | null };
+  /** un altro server sta già usando la cartella dati: questo è in sola lettura */
+  readOnly: { host: string; url: string; since: string } | null;
 }
 
 export interface ServerInfo {
   ok: true;
   version: string;
   mode: 'locale' | 'rete';
-  dataDir: string;
-  appDir: string;
-  configFile: string;
   port: number;
-  server: { user: string; host: string };
-  heartbeatMs: number;
-  lockTtlMs: number;
+  server: string;
+  access: { mode: AccessMode; ospiti: boolean; levels: Level[]; autoLevel: Level; auto: boolean; who: string };
+  status: ServerStatus;
+  /** solo per l'amministratore */
+  dataDir?: string;
+  appDir?: string;
+  configFile?: string;
 }
 
-export interface StateResponse {
+export interface Session {
+  id: string;
+  user: string;
+  level: Level;
+  color: string;
+  account: boolean;
+  guest: boolean;
+  expiresAt: string;
+}
+
+export interface StateResponse extends ServerStatus {
   ok: boolean;
   rev: number;
   savedAt: string | null;
   savedBy: string | null;
   data: AppData;
-  lock: LockInfo | null;
 }
 
-export interface StatusResponse {
+/** un valore appena scritto da qualcuno e sostituito da un salvataggio successivo */
+export interface Overwrite {
+  t: RecordKind;
+  id: string;
+  field: string;
+  value: unknown;
+  by: string;
+  sid: string;
+  label: string;
+}
+
+export interface Skipped {
+  t: RecordKind;
+  id: string;
+  reason: 'esiste' | 'eliminato' | 'riferimento';
+  by?: string;
+  at?: string;
+  label?: string;
+}
+
+export type Fix = { t: RecordKind; rec: Record<string, unknown> & { id: string } } | { t: RecordKind; id: string; deleted: true };
+
+export interface OpsResponse {
   ok: boolean;
   rev: number;
-  savedAt: string | null;
-  savedBy: string | null;
-  empty?: boolean;
-  lock: LockInfo | null;
+  skipped: Skipped[];
+  fix: Fix[];
+  overwrote: Overwrite[];
 }
 
-export interface LockResponse {
+export interface BatchEvent {
+  rev: number;
+  at: string;
+  user: string;
+  sid: string;
+  client: string;
+  batch: string;
+  ops: Op[];
+  overwrote: Overwrite[];
+}
+
+export interface Presence {
+  client: string;
+  sid: string;
+  user: string;
+  color: string;
+  level: Level;
+  page: string | null;
+  project: string | null;
+  node: string | null;
+  field: string | null;
+  note: string | null;
+}
+
+export interface PollResponse {
   ok: boolean;
-  reason?: 'busy' | 'lost';
-  lock?: LockInfo | null;
-  takenOver?: boolean;
-  rev?: number;
+  rev: number;
+  batches: BatchEvent[];
+  reload: boolean;
+  presence: Presence[];
+  server: ServerStatus;
 }
 
-export interface SaveResponse {
-  ok: boolean;
-  rev?: number;
-  error?: 'conflict' | 'locked' | string;
-  lock?: LockInfo | null;
-  savedBy?: string | null;
+export interface LogChange {
+  op: 'add' | 'set' | 'del' | 'order' | 'replace';
+  t?: RecordKind;
+  id?: string | null;
+  label?: string;
+  root?: string | null;
+  fields?: Record<string, [unknown, unknown] | null>;
+  count?: number;
 }
 
-const TIMEOUT_MS = 12_000;
+export interface LogEntry {
+  rev: number;
+  at: string;
+  user: string;
+  changes: LogChange[];
+}
+
+/** risposta di errore del server (401 = serve l'accesso, 403 = livello insufficiente…) */
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
+  constructor(status: number, message: string, body?: unknown) {
+    super(message);
+    this.status = status;
+    this.body = body;
+  }
+}
+
+const TIMEOUT_MS = 15_000;
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(path, { ...init, signal: ctrl.signal, cache: 'no-store' });
+    const res = await fetch(path, { ...init, signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin' });
     const text = await res.text();
     let json: unknown = null;
     try {
       json = text ? JSON.parse(text) : null;
     } catch {
-      throw new Error('risposta non valida dal server');
+      throw new ApiError(res.status, 'risposta non valida dal server');
     }
-    // 409 (occupato / conflitto) e 403 (password sbagliata) sono risposte di lavoro,
-    // non errori di rete: le legge chi ha fatto la chiamata
-    if (!res.ok && res.status !== 409 && res.status !== 403) {
-      const msg = (json as { error?: string })?.error ?? `HTTP ${res.status}`;
-      throw new Error(msg);
-    }
+    if (!res.ok) throw new ApiError(res.status, (json as { error?: string })?.error ?? `HTTP ${res.status}`, json);
     return json as T;
   } finally {
     window.clearTimeout(timer);
@@ -101,63 +170,45 @@ function post<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
-export interface Identity {
-  sessionId: string;
-  user: string;
-  host: string;
-}
-
-/** livelli di accesso, dal più basso al più alto */
-export type Level = 'lettura' | 'modifica' | 'admin';
-
-export interface AuthResponse {
-  ok: boolean;
-  /** false quando manca gantt-utenti.json: tutti amministratori, come prima */
-  enabled: boolean;
-  /** livello che spetta a questo computer senza digitare niente */
-  level: Level;
-  /** true se il livello arriva dall'elenco dei PC e non dal valore predefinito */
-  auto: boolean;
-  /** livelli che si possono sbloccare con una password */
-  levels: Level[];
-  /** come il server ha riconosciuto questo computer (da copiare nell'elenco «pc») */
-  who: string;
-  file: string;
-  exists: boolean;
-}
-
-export interface LoginResponse {
-  ok: boolean;
-  level?: Level;
-  enabled?: boolean;
-  error?: 'password' | 'pausa' | string;
-  waitMs?: number;
-}
-
 export const api = {
   info: () => call<ServerInfo>('api/info'),
-  state: () => call<StateResponse>('api/state'),
-  status: () => call<StatusResponse>('api/status'),
-  lock: (id: Identity, force = false) => post<LockResponse>('api/lock', { ...id, force }),
-  heartbeat: (sessionId: string) => post<LockResponse>('api/heartbeat', { sessionId }),
-  unlock: (sessionId: string) => post<{ ok: boolean }>('api/unlock', { sessionId }),
-  requestControl: (id: Identity) => post<{ ok: boolean; free?: boolean }>('api/request-control', id),
-  yieldControl: (sessionId: string) => post<{ ok: boolean }>('api/yield', { sessionId }),
-  save: (id: Identity, baseRev: number, data: AppData) =>
-    post<SaveResponse>('api/save', { ...id, baseRev, data }),
-  backup: (data: AppData) => post<{ ok: boolean; file?: string; dir?: string }>('api/backup', data),
-  auth: () => call<AuthResponse>('api/auth'),
-  login: (password: string) => post<LoginResponse>('api/auth', { password }),
+  session: () => call<{ ok: boolean; session: Session }>('api/sessione'),
+  login: (nome: string, password: string) => post<{ ok: boolean; session: Session }>('api/sessione', { nome, password }),
+  unlock: (password: string) => post<{ ok: boolean; session: Session }>('api/sessione/livello', { password }),
+  baseLevel: () => post<{ ok: boolean; session: Session }>('api/sessione/base', {}),
+  logout: () => post<{ ok: boolean }>('api/sessione/esci', {}),
+  state: () => call<StateResponse>('api/stato'),
+  ops: (body: { client: string; batch: string; ops: Op[] }) => post<OpsResponse>('api/operazioni', body),
+  poll: (rev: number, client: string) =>
+    call<PollResponse>(`api/eventi?poll=1&rev=${encodeURIComponent(rev)}&client=${encodeURIComponent(client)}`),
+  presence: (body: Record<string, string | null>) => post<{ ok: boolean }>('api/presenza', body),
+  log: (q: { limit?: number; before?: number; utente?: string; progetto?: string }) => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== '') params.set(k, String(v));
+    return call<{ ok: boolean; entries: LogEntry[] }>(`api/registro?${params}`);
+  },
+  backup: () => post<{ ok: boolean; file?: string }>('api/backup', {}),
 };
 
-/** rilascio del blocco alla chiusura della pagina: deve partire anche mentre il browser chiude */
-export function releaseOnUnload(sessionId: string) {
+/** indirizzo del canale in tempo reale (Server-Sent Events) */
+export function eventsUrl(rev: number, client: string): string {
+  return `api/eventi?rev=${encodeURIComponent(rev)}&client=${encodeURIComponent(client)}`;
+}
+
+/** salvataggio «all'ultimo respiro» alla chiusura della pagina (solo gruppi piccoli) */
+export function sendOpsOnUnload(body: { client: string; batch: string; ops: Op[] }): boolean {
+  const text = JSON.stringify(body);
+  if (text.length > 60_000) return false;
   try {
-    const body = new Blob([JSON.stringify({ sessionId })], { type: 'application/json' });
-    if (navigator.sendBeacon && navigator.sendBeacon('api/unlock', body)) return;
+    void fetch('api/operazioni', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text,
+      keepalive: true,
+      credentials: 'same-origin',
+    });
+    return true;
   } catch {
-    /* sendBeacon non disponibile */
+    return false;
   }
-  // ripiego sincrono: il blocco scade comunque da solo dopo poco più di un minuto
-  void api.unlock(sessionId).catch(() => {});
 }

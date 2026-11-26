@@ -8,15 +8,43 @@
 // Le righe "GANTT_*=" stampate all'avvio possono essere lette da uno script di avvio.
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { join, extname, normalize } from 'node:path';
+import { createWriteStream, mkdirSync, renameSync, statSync } from 'node:fs';
+import { join, extname } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { exec } from 'node:child_process';
 import { loadConfig } from './server/config.mjs';
 import { configure, dataPaths } from './server/store.mjs';
 import { handleApi } from './server/api.mjs';
+import { staticPath } from './server/static.mjs';
+import { closeArchive, openArchive, setArchiveUrl } from './server/archive.mjs';
+import { closeStreams } from './server/events.mjs';
+import { setTrustProxy, setUsersFile } from './server/users.mjs';
+import { allowedHosts, hostAllowed, securityHeaders } from './server/security.mjs';
 
 const cfg = loadConfig();
 configure(cfg);
+setTrustProxy(cfg.proxy);
+setUsersFile(cfg.usersFile);
+
+// --log: come servizio non c'è una finestra; i messaggi vanno anche in dati\gantt-server.log
+// (unico posto in cui il programma scrive, insieme all'archivio). Oltre 5 MB si ricomincia.
+if (process.argv.includes('--log')) {
+  const file = join(cfg.dataDir, 'gantt-server.log');
+  try {
+    mkdirSync(cfg.dataDir, { recursive: true });
+    if (statSync(file, { throwIfNoEntry: false })?.size > 5 * 1024 * 1024) renameSync(file, file + '.1');
+    const stream = createWriteStream(file, { flags: 'a' });
+    for (const level of ['log', 'warn', 'error']) {
+      const original = console[level].bind(console);
+      console[level] = (...args) => {
+        original(...args);
+        stream.write(`${new Date().toISOString()} ${args.map(String).join(' ')}\n`);
+      };
+    }
+  } catch (err) {
+    console.error('GANTT_WARN=registro di avvio non scrivibile: ' + (err?.message ?? err));
+  }
+}
 
 const MAX_TRIES = 40;
 const ROOT = join(cfg.appDir, 'dist');
@@ -43,14 +71,31 @@ async function send(res, file, code = 200) {
   res.end(body);
 }
 
+// nomi ammessi del server (gli indirizzi di rete possono cambiare: si ricalcolano ogni minuto)
+let hosts = { at: 0, set: new Set() };
+const currentHosts = () => {
+  if (Date.now() - hosts.at > 60_000) hosts = { at: Date.now(), set: allowedHosts(cfg) };
+  return hosts.set;
+};
+
 async function handler(req, res) {
   try {
-    const urlPath = decodeURIComponent((req.url ?? '/').split('?')[0]);
+    for (const [k, v] of Object.entries(securityHeaders(req))) res.setHeader(k, v);
+    if (!hostAllowed(req, cfg, currentHosts())) {
+      res.writeHead(421, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Nome del server non riconosciuto / Servername nicht erkannt');
+      return;
+    }
+    const rawPath = (req.url ?? '/').split('?')[0];
+    let file = staticPath(ROOT, rawPath);
+    if (!file) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Indirizzo non valido');
+      return;
+    }
 
-    if (await handleApi(req, res, urlPath)) return;
+    if (await handleApi(req, res, decodeURIComponent(rawPath))) return;
 
-    let file = normalize(join(ROOT, urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '')));
-    if (!file.startsWith(ROOT)) file = join(ROOT, 'index.html'); // nessun accesso fuori da dist
     try {
       const s = await stat(file);
       if (s.isDirectory()) file = join(file, 'index.html');
@@ -59,8 +104,9 @@ async function handler(req, res) {
     }
     await send(res, file);
   } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Errore: ' + (err instanceof Error ? err.message : String(err)));
+    console.error('GANTT_WARN=' + (err instanceof Error ? err.message : String(err)));
+    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Errore interno');
   }
 }
 
@@ -98,6 +144,21 @@ async function start() {
   let port = cfg.port;
   let bound = null;
 
+  // prima l'archivio, poi le richieste: un archivio illeggibile ferma l'avvio
+  // (meglio un errore chiaro che un programma che riparte da vuoto)
+  try {
+    const opened = await openArchive();
+    if (opened.readOnly) {
+      console.error(
+        `GANTT_WARN=la cartella dati è già usata dal server Gantt Planner su ${opened.readOnly.host} ` +
+          `(${opened.readOnly.url || 'indirizzo sconosciuto'}): questo si apre in sola lettura`,
+      );
+    }
+  } catch (err) {
+    console.error('GANTT_ERROR=' + (err?.message ?? String(err)));
+    process.exit(1);
+  }
+
   // in modalità locale si ascolta su 127.0.0.1 e ::1: "localhost" su Windows
   // può risolvere in IPv6 e il controllo di avvio su IPv4 fallirebbe.
   const primaryHost = cfg.mode === 'rete' ? null : '127.0.0.1';
@@ -130,6 +191,7 @@ async function start() {
   }
 
   const url = cfg.mode === 'rete' || ipv6 ? `http://localhost:${bound}` : `http://127.0.0.1:${bound}`;
+  setArchiveUrl(cfg.mode === 'rete' ? (lanUrls(bound)[0] ?? url) : url);
 
   console.log('GANTT_PORT=' + bound);
   console.log('GANTT_URL=' + url);
@@ -145,18 +207,27 @@ async function start() {
   }
   console.log('  Chiudere questa finestra per terminare il programma.\n');
 
-  if (!process.env.NO_OPEN) {
+  // come servizio (o con --senza-browser) non si apre nessun browser
+  if (!process.env.NO_OPEN && !process.argv.includes('--senza-browser')) {
     if (process.platform === 'win32') exec(`start "" "${url}"`);
     else if (process.platform === 'darwin') exec(`open "${url}"`);
     else exec(`xdg-open "${url}"`);
   }
 
-  const shutdown = () => {
+  // chiusura ordinata: si scrive gantt-dati.json e si libera la cartella dati.
+  // (Anche senza, nulla si perde: ogni modifica è già nel registro e viene riapplicata all'avvio.)
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true;
+    closeStreams();
     for (const s of servers) s.close();
+    await closeArchive().catch((err) => console.error('GANTT_WARN=' + (err?.message ?? err)));
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  process.on('SIGHUP', shutdown); // Windows: chiusura della finestra
 }
 
 start();

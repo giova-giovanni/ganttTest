@@ -61,7 +61,8 @@ export function IoDialog({ onClose }: { onClose: () => void }) {
   };
 
   const backupNow = async () => {
-    const res = await runAutoBackup(data, { force: true, interactive: true });
+    // senza cartella scelta: l'amministratore fa scrivere al server una copia in dati/backups
+    const res = await runAutoBackup(data, { force: true, interactive: true, server: isAdmin });
     setBackupMsg(res.done && res.file ? t('backup.autoDone', { file: res.file }) : t('backup.failed'));
     setLastBackup(lastAutoBackupAt());
   };

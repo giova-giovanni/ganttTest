@@ -10,8 +10,8 @@ esempio, inventati, in [`src/demo.ts`](src/demo.ts). L'interfaccia è in italian
 
 ## Avvio
 
-Serve [Node.js](https://nodejs.org) LTS, versione 22 o successiva (il programma da solo gira
-anche con la 20; i test unitari richiedono la 22).
+Serve [Node.js](https://nodejs.org) LTS, versione 22 o successiva (per i test la 22.15 o
+successiva).
 
 ```bash
 npm install
@@ -36,11 +36,19 @@ Su Windows basta un doppio clic su **`avvia.bat`** (installa, compila e avvia).
 Aperta come sito statico (`npm run preview` o qualsiasi hosting di file) l'app funziona lo
 stesso: i dati restano **nel browser** (localStorage) e al primo avvio compaiono i dati di esempio.
 
+### Prova con più utenti, su dati finti
+
+`node tools/avvia-prova.mjs --account` avvia il server sulla porta 5199 con una cartella dati
+finta (in `.test-tmp/`) e due account di prova: *Mario Rossi* / `prova-mario` (admin) e
+*Anna Bianchi* / `prova-anna` (modifica). Basta aprire l'indirizzo in due browser diversi (o in una
+finestra anonima) ed entrare con i due account.
+
 ## Dove finiscono i dati
 
 | Modalità | Dove | Nel repository? |
 |---|---|---|
-| Con il server (`npm start`, `npm run dev`) | cartella `dati/` accanto al programma: `gantt-dati.json`, copia `gantt-dati.bak.json`, `versioni/` (una copia all'ora, ultime 30), `backups/` (backup settimanale, ultimi 20) | **No**, esclusa da `.gitignore` |
+| Con il server (`npm start`) | cartella `dati/` accanto al programma: `gantt-dati.json` (riscritto entro un secondo da ogni modifica), `registro/` (ogni modifica: chi, quando, cosa), copia `gantt-dati.bak.json`, `versioni/` (una copia all'ora, ultime 30), `backups/` (backup settimanale fatto dal server, ultimi 20) | **No**, esclusa da `.gitignore` |
+| In sviluppo (`npm run dev`) | `.test-tmp/dati-sviluppo/`, mai la cartella `dati/` (si cambia con `GANTT_DATI`) | No |
 | Senza server | `localStorage` del browser | No |
 | Esportazioni (`GANTT_*.json`, `GANTT_*.csv`) | cartella dei download | No, escluse da `.gitignore` |
 
@@ -51,10 +59,13 @@ quando l'archivio è vuoto (*Svuota tutto*).
 ## Test
 
 ```bash
-npm test                          # test unitari (Vitest)
+npm test                          # tutti i test senza browser: Vitest + node:test
 npx playwright install chromium   # solo la prima volta
 npm run test:e2e                  # build + test nel browser (Playwright)
 ```
+
+Per usare un browser già installato invece di scaricare Chromium: variabile d'ambiente
+`PW_CHANNEL=msedge` (oppure `chrome`) prima di `npm run test:e2e`.
 
 | Suite | Cosa verifica |
 |---|---|
@@ -64,10 +75,15 @@ npm run test:e2e                  # build + test nel browser (Playwright)
 | `tests/unit/import-export.test.ts` | CSV in stile Excel IT/DE, esportazione → reimportazione, backup JSON, colonne in tedesco |
 | `tests/unit/data.test.ts` | coerenza dei dati di esempio e normalizzazione di dati sporchi |
 | `tests/e2e/browser.spec.ts` | modalità solo-browser: nuovo progetto, barre del Gantt, trascinamento e ridimensionamento, annulla/ripristina, persistenza, carico di lavoro, backup JSON, lingua e tema |
-| `tests/e2e/server.spec.ts` | modalità server: salvataggio su file, blocco di scrittura, secondo utente in sola lettura con aggiornamento automatico, passaggio della modifica |
+| `tests/e2e/server.spec.ts` | modalità server: due utenti modificano insieme, le modifiche arrivano subito all'altro, chi è connesso, dati riletti dal file |
+| `tests/server-archive.test.mjs` | archivio del server: mai un archivio vuoto al posto di uno rovinato, scrittura sicura, registro e ripresa dopo uno spegnimento brusco, migrazione, cascate, sola lettura se la cartella è già in uso |
+| `tests/server-api.test.mjs`, `tests/server-users.test.mjs` | rotte `/api/*`, sessioni con scadenza, account e hash delle password, blocco dopo troppi tentativi, livelli controllati dal server |
+| `tests/server-security.test.mjs`, `tests/server-static.test.mjs` | intestazioni di sicurezza, nome del server (DNS rebinding), origine delle scritture, proxy, nessuna uscita dalla cartella dell'interfaccia |
+| `tests/shared-ops.test.mjs`, `tests/store-collab.test.mjs`, `tests/store-merge.test.mjs` | operazioni per record uguali nel browser e nel server; due utenti insieme: sovrascritture, record eliminati, annulla; unione di dati importati |
+| `tests/csv.test.mjs`, `tests/import.test.mjs`, `tests/export.test.mjs`, `tests/backup.test.mjs`, `tests/rules.test.mjs` | separatori e virgolette dei CSV, importazione di file della cartella dati e di gerarchie, perimetro dell'export, backup sul server, regole di calcolo |
 
 I test end-to-end avviano da soli un server statico e il server vero su una cartella dati
-temporanea: non toccano mai `dati/`.
+temporanea; i test node:test usano cartelle temporanee: nessun test tocca `dati/`.
 
 ---
 
@@ -116,12 +132,30 @@ responsabili e assenze. A4 o A3, orizzontale o verticale; nel browser scegli «S
 
 ### Più persone sullo stesso archivio
 
-Con il server i dati stanno in un file: chi apre per primo lavora in **Modifica**, gli altri
-vedono «Archivio già in uso» e possono aprire in **sola lettura** (si aggiornano da soli
-quando l'altro salva) oppure **chiedere di modificare**. *Lascia la modifica* libera il posto;
-un blocco senza segnali di vita per oltre un minuto si può riprendere con *Prendi il controllo*.
-Ogni salvataggio scrive prima un file temporaneo e poi lo rinomina, quindi una caduta a metà
-non rovina l'archivio.
+Con il server tutti lavorano **insieme**, come in un foglio condiviso:
+
+| Situazione | Cosa succede |
+|---|---|
+| Apertura | Si entra con il proprio nome (e la password, se ci sono gli account) |
+| Un collega modifica | La modifica compare subito, senza ricaricare la pagina |
+| Chi c'è | In alto **Connessi** con le iniziali; nella barra a sinistra chi lavora su ogni progetto; la riga in modifica ha un bordo colorato |
+| Campi diversi della stessa attività | Restano entrambe le modifiche |
+| Stessa cella | Vince l'ultima; chi è stato sostituito vede un avviso con **Rimetti il mio valore** |
+| Una nota | La scrive una persona alla volta; gli altri la vedono cambiare dal vivo |
+| Rete assente per poco | Si continua a lavorare: le modifiche restano in attesa e partono da sole |
+| Annulla (`Ctrl+Z`) | Annulla solo le **proprie** modifiche, mai quelle dei colleghi |
+| Rami aperti/chiusi | Scelta personale: per gli altri non cambia nulla |
+
+**Registro modifiche** mostra chi ha cambiato cosa e quando, con il valore prima e dopo. Il server
+è l'unico a scrivere il file: annota ogni modifica nel registro prima di confermarla (nulla si
+perde se si spegne di colpo) e riscrive `gantt-dati.json` entro un secondo. Una cartella dati la
+usa **un solo** server: un secondo avviato sulla stessa cartella parte in sola lettura e indica
+l'indirizzo giusto.
+
+Installazione su un server aziendale (servizio Windows, HTTPS con proxy, firewall, backup):
+[docs/installazione-server.md](docs/installazione-server.md). Riepilogo in due minuti:
+[docs/online.md](docs/online.md); scelte tecniche: [docs/ADR-001-multiutente.md](docs/ADR-001-multiutente.md);
+prima del rilascio: [docs/checklist-rilascio.md](docs/checklist-rilascio.md).
 
 ### Scorciatoie
 
@@ -140,21 +174,28 @@ Tutto funziona senza configurazione. Per cambiare i valori predefiniti:
 | Cartella dati | `--dati <cartella>` | `GANTT_DATI` | `"dati"` |
 | Porta (predefinita 5180) | `--porta <n>` | `GANTT_PORTA` | `"porta"` |
 | Modalità `locale` / `rete` | `--modo rete` | `GANTT_MODO` | `"modo"` |
+| Dietro un proxy HTTPS (IIS, Caddy) | `--proxy` | `GANTT_PROXY` | `"proxy": true` |
+| Altri nomi del server (es. `gantt.azienda.local`) | `--nomi a,b` | `GANTT_NOMI` | `"nomi"` |
+| File degli utenti | `--utenti <file>` | `GANTT_UTENTI` | `"utenti"` |
 
 Il file si crea copiando [`gantt-config.esempio.json`](gantt-config.esempio.json).
 
-**Livelli di accesso** — senza file tutti sono amministratori. Copiando
-[`gantt-utenti.esempio.json`](gantt-utenti.esempio.json) in `gantt-utenti.json` si attivano tre
-livelli (*lettura*, *modifica*, *admin*) con password e un elenco di PC che ottengono il livello
-da soli. È una protezione contro gli errori, non una cassaforte. `gantt-config.json` e
-`gantt-utenti.json` sono esclusi da git.
+**Accesso** — senza `gantt-utenti.json` ognuno entra con il proprio nome ed è amministratore.
+Copiando [`gantt-utenti.esempio.json`](gantt-utenti.esempio.json) in `gantt-utenti.json` si attivano
+gli **account personali**: nome, livello (*lettura*, *modifica*, *admin*) e password salvata come
+hash scrypt (`node tools/password.mjs "password"` stampa il testo da incollare; `--converti`
+trasforma le password in chiaro di un file esistente, dopo averne fatto una copia). Con
+`"ospiti": true` chi non ha un account entra in sola lettura. In alternativa restano le password
+di livello delle versioni precedenti. I livelli li controlla il **server**; la sessione dura una
+giornata di lavoro (`sessioneOre`, 10) e scade dopo 2 ore senza attività (`inattivitaMinuti`).
+`gantt-config.json` e `gantt-utenti.json` sono esclusi da git.
 
 ## Struttura del codice
 
 ```
 src/
   types.ts           modello dati e stati
-  store.ts           stato globale, annulla/ripristina, salvataggio, migrazione
+  store.ts           stato globale, annulla/ripristina, coda dei salvataggi, modifiche altrui, migrazione
   i18n.ts            testi IT/DE
   demo.ts            dati di esempio (inventati)
   utils/dates.ts     date, giorni lavorativi, settimane ISO
@@ -163,13 +204,24 @@ src/
   utils/csv.ts       lettura/scrittura CSV in stile Excel IT/DE
   utils/io.ts        esportazione e importazione con anteprima
   utils/backup.ts    backup settimanale automatico
-  components/        Board (tabella + Gantt), TreeGrid, Gantt, dialoghi, stampa
+  utils/api.ts       dialogo con il server
+  utils/fields.ts    nomi e valori dei campi per avvisi e registro
+  components/        Board (tabella + Gantt), TreeGrid, Gantt, dialoghi, stampa, barra di stato, registro
   pages/             Home, Progetto, Carico, Responsabili, Note
+shared/ops.mjs       operazioni sui dati: lo stesso codice nel browser e nel server
 server.mjs           server HTTP senza dipendenze (interfaccia + archivio)
-server/config.mjs    cartella dati, porta, modalità
-server/store.mjs     archivio su file e blocco di scrittura
-server/users.mjs     livelli di accesso
+server/config.mjs    cartella dati, porta, modalità, proxy, nomi, file degli utenti
+server/archive.mjs   archivio in memoria: operazioni per record, revisioni, registro, un solo server per cartella
+server/store.mjs     file su disco: lettura, scrittura sicura, copie e backup
+server/sessions.mjs  sessioni con scadenza (cookie HttpOnly)
+server/users.mjs     account, livelli di accesso, hash delle password, blocco dei tentativi
+server/events.mjs    aggiornamenti in tempo reale (SSE) e presenze
+server/security.mjs  intestazioni di sicurezza e controllo del nome del server
+server/static.mjs    file dell'interfaccia, senza uscire dalla cartella dist
 server/api.mjs       rotte /api/*
+tools/               prova con dati finti, password, servizio Windows, verifica dell'archivio
+docs/                installazione sul server, scelte tecniche, checklist di rilascio
 tests/unit/          test Vitest
+tests/*.test.mjs     test node:test (server, accesso, sicurezza, più utenti, import/export)
 tests/e2e/           test Playwright
 ```

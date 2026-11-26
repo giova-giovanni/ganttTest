@@ -1,6 +1,6 @@
 import React from 'react';
 import { addProject, deleteNode, loadDemo, resetAll, setArchived, setUi, useStore } from '../store';
-import { IconArchive, IconRestore, useCanAdmin, useCanEdit, useIsAdmin, useT } from '../ui';
+import { IconArchive, IconRestore, PresenceDots, useCanAdmin, useCanEdit, useIsAdmin, useOthers, useT } from '../ui';
 import { computeAll, descendantIds, STATUS_COLORS } from '../utils/tree';
 import { formatDate } from '../utils/dates';
 import { translate } from '../i18n';
@@ -13,6 +13,7 @@ export function Sidebar() {
   const canAdmin = useCanAdmin();
   const isAdmin = useIsAdmin();
   const [showArchive, setShowArchive] = React.useState(false);
+  const others = useOthers();
   const computed = React.useMemo(() => computeAll(data.nodes), [data.nodes]);
   const roots = data.nodes.filter((n) => n.parentId === null);
   const active = roots.filter((n) => !n.archived);
@@ -28,15 +29,18 @@ export function Sidebar() {
     const count = descendantIds(data.nodes, n.id).length;
     const isActive = ui.selectedProjectId === n.id && ui.page === 'project';
     const finished = c.status === 'DONE' || c.status === 'CANCELLED';
+    const here = others.filter((p) => p.project === n.id);
     return (
       <div key={n.id} style={{ position: 'relative' }}>
         <button
           className={'proj' + (isActive ? ' active' : '') + (n.archived ? ' arch' : '')}
           onClick={() => setUi({ page: 'project', selectedProjectId: n.id })}
+          title={here.length ? t('presence.here', { users: here.map((p) => p.user).join(', ') }) : undefined}
         >
           <span className="pname">
             <span className="dot" style={{ background: STATUS_COLORS[c.status] }} />
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{n.name}</span>
+            <PresenceDots people={here} size={15} max={3} />
           </span>
           <span className="pmeta">
             <span>
@@ -102,7 +106,8 @@ export function Sidebar() {
           + {t('sidebar.newProject')}
         </button>
         {roots.length === 0 && (
-          <button className="btn sm" onClick={loadDemo} disabled={!canEdit}>
+          // carica i dati di esempio sostituendo l'archivio: nell'archivio condiviso è da amministratore
+          <button className="btn sm" onClick={loadDemo} disabled={!canAdmin}>
             {t('btn.demo')}
           </button>
         )}

@@ -6,7 +6,8 @@ import { STATUS_COLORS } from '../utils/tree';
 import { formatDate, parseUserDate } from '../utils/dates';
 import { translate, type TKey } from '../i18n';
 import { Avatar, fmtHours } from '../ui';
-import { setColWidth } from '../store';
+import { reportPresence, setColWidth } from '../store';
+import type { Presence } from '../utils/api';
 
 interface Col {
   key: ColKey;
@@ -57,6 +58,8 @@ interface Props {
   scrollRef?: React.RefObject<HTMLDivElement>;
   onScroll?: (e: React.UIEvent<HTMLDivElement>) => void;
   width: number;
+  /** righe che altri utenti stanno modificando in questo momento */
+  editedBy?: Record<string, Presence>;
 }
 
 export function TreeGrid({
@@ -78,9 +81,15 @@ export function TreeGrid({
   scrollRef,
   onScroll,
   width,
+  editedBy = {},
 }: Props) {
   const [col, setCol] = React.useState<ColKey>('name');
   const [editing, setEditing] = React.useState<{ id: string; col: ColKey } | null>(null);
+
+  // gli altri vedono quale riga si sta modificando (bordo colorato con il nome)
+  React.useEffect(() => {
+    reportPresence({ node: editing?.id ?? null, field: editing?.col ?? null });
+  }, [editing?.id, editing?.col]);
   const [draft, setDraft] = React.useState('');
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const tableRef = React.useRef<HTMLTableElement | null>(null);
@@ -446,6 +455,7 @@ export function TreeGrid({
           {rows.map((row) => {
             const sel = row.node.id === selectedId;
             const cp = row.computed;
+            const other = editedBy[row.node.id];
             return (
               <tr
                 key={row.node.id}
@@ -454,7 +464,8 @@ export function TreeGrid({
                   (sel ? ' sel-row' : '') +
                   (cp.status === 'CANCELLED' ? ' cancelled' : '')
                 }
-                style={{ height: rowHeight }}
+                style={{ height: rowHeight, boxShadow: other ? `inset 3px 0 0 ${other.color}` : undefined }}
+                title={other ? translate(lang, 'presence.editingRow', { user: other.user }) : undefined}
                 onMouseDown={() => onSelect(row.node.id)}
               >
                 {COLS.map((c) => {

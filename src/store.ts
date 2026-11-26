@@ -1,15 +1,31 @@
 import { useSyncExternalStore } from 'react';
 import type { Absence, AppData, ColKey, HomeLayout, Note, Person, Status, TaskNode, UiState } from './types';
 import { STATUSES, ABSENCE_TYPES } from './types';
+import type { TKey } from './i18n';
 import { demoData } from './demo';
 import { descendantIds, sanitizeNodes } from './utils/tree';
 import { parseTags, sanitizeHtml } from './utils/notes';
-import { api, releaseOnUnload, type Identity, type Level, type LockInfo, type ServerInfo } from './utils/api';
+import {
+  api,
+  ApiError,
+  eventsUrl,
+  sendOpsOnUnload,
+  type AccessMode,
+  type BatchEvent,
+  type Fix,
+  type Level,
+  type OpsResponse,
+  type Presence,
+  type ServerInfo,
+  type ServerStatus,
+  type Session,
+} from './utils/api';
+import { KINDS, applyOps, diffOps, keyOf, type Op, type RecordKind } from '../shared/ops.mjs';
 
 const DATA_KEY = 'gantt.data.v1';
 const UI_KEY = 'gantt.ui.v1';
-const SESSION_KEY = 'gantt.session';
-const LEVEL_KEY = 'gantt.level';
+/** rami aperti/chiusi nell'archivio condiviso: preferenza di questo browser, non dei dati comuni */
+const COLLAPSE_KEY = 'gantt.rami.v1';
 
 export const DATA_VERSION = 4;
 
@@ -18,6 +34,11 @@ export function uid(prefix = 'n'): string {
   seq += 1;
   return `${prefix}_${Date.now().toString(36)}${seq.toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
 }
+
+/** identifica questa scheda del browser verso il server (le proprie modifiche tornano indietro marcate) */
+export const CLIENT_ID = uid('c');
+
+// ---------------------------------------------------------------- normalizzazione dei dati
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
 const isoOrNull = (v: unknown): string | null => (typeof v === 'string' && ISO_RE.test(v) ? v : null);
@@ -33,134 +54,174 @@ const isoTime = (v: unknown, fallback: string): string => {
   return Number.isNaN(d.getTime()) ? fallback : d.toISOString();
 };
 
+type Raw = Record<string, unknown>;
+
+function normPerson(p: Raw): Person {
+  const h = num(p.hoursPerDay);
+  return {
+    id: str(p.id) || uid('p'),
+    name: str(p.name),
+    role: str(p.role),
+    color: /^#[0-9a-fA-F]{6}$/.test(str(p.color)) ? str(p.color) : '#2f7de1',
+    hoursPerDay: h && h > 0 && h <= 24 ? h : 8,
+  };
+}
+
+function normNode(n: Raw): TaskNode {
+  return {
+    id: str(n.id),
+    parentId: str(n.parentId) || null,
+    name: str(n.name),
+    status: STATUSES.includes(n.status as Status) ? (n.status as Status) : 'TODO',
+    start: isoOrNull(n.start),
+    end: isoOrNull(n.end),
+    hours: num(n.hours),
+    assigneeId: str(n.assigneeId) || null,
+    notes: str(n.notes),
+    collapsed: !!n.collapsed,
+    archived: !!n.archived,
+  };
+}
+
+function normAbsence(a: Raw): Absence {
+  const s = isoOrNull(a.start);
+  const e = isoOrNull(a.end) ?? s;
+  return {
+    id: str(a.id) || uid('a'),
+    personId: str(a.personId),
+    start: (s && e && e < s ? e : s) as string,
+    end: (s && e && e < s ? s : e) as string,
+    type: ABSENCE_TYPES.includes(a.type as Absence['type']) ? (a.type as Absence['type']) : 'OTHER',
+    note: str(a.note),
+  };
+}
+
+function normNote(n: Raw, now: string): Note {
+  const createdAt = isoTime(n.createdAt, now);
+  return {
+    id: str(n.id) || uid('nt'),
+    nodeId: str(n.nodeId),
+    title: str(n.title).slice(0, 200),
+    // il testo formattato viene sempre ripulito: un file o un altro utente non possono iniettare codice
+    body: sanitizeHtml(str(n.body)),
+    tags: Array.isArray(n.tags) ? parseTags(n.tags.map(String).join(',')) : [],
+    author: str(n.author),
+    createdAt,
+    updatedAt: isoTime(n.updatedAt, createdAt),
+    pinned: !!n.pinned,
+  };
+}
+
+const isObj = (v: unknown): v is Raw => !!v && typeof v === 'object';
+
 /**
  * Normalizza dati che possono arrivare da un file esterno o da una versione precedente.
  * Non deve mai lanciare eccezioni: valori sconosciuti vengono sostituiti dai default.
  */
 export function migrate(data: Partial<AppData> | null | undefined): AppData {
-  const d = data ?? {};
-  const people: Person[] = (Array.isArray(d.people) ? d.people : [])
-    .filter((p): p is Person => !!p && typeof p === 'object')
-    .map((p) => ({
-      id: str(p.id) || uid('p'),
-      name: str(p.name),
-      role: str(p.role),
-      color: /^#[0-9a-fA-F]{6}$/.test(str(p.color)) ? p.color : '#2f7de1',
-      hoursPerDay: (() => {
-        const h = num(p.hoursPerDay);
-        return h && h > 0 && h <= 24 ? h : 8;
-      })(),
-    }));
+  const d = (data ?? {}) as Raw;
+  const people: Person[] = (Array.isArray(d.people) ? d.people : []).filter(isObj).map(normPerson);
   const peopleIds = new Set(people.map((p) => p.id));
 
   const nodes: TaskNode[] = sanitizeNodes(
     (Array.isArray(d.nodes) ? d.nodes : [])
-      .filter((n): n is TaskNode => !!n && typeof n === 'object')
-      .map((n) => ({
-        id: str(n.id),
-        parentId: str(n.parentId) || null,
-        name: str(n.name),
-        status: STATUSES.includes(n.status) ? n.status : 'TODO',
-        start: isoOrNull(n.start),
-        end: isoOrNull(n.end),
-        hours: num(n.hours),
-        assigneeId: n.assigneeId && peopleIds.has(n.assigneeId) ? n.assigneeId : null,
-        notes: str(n.notes),
-        collapsed: !!n.collapsed,
-        archived: !!n.archived,
-      })),
+      .filter(isObj)
+      .map(normNode)
+      .map((n) => (n.assigneeId && !peopleIds.has(n.assigneeId) ? { ...n, assigneeId: null } : n)),
   );
   const nodeIds = new Set(nodes.map((n) => n.id));
 
   const absences: Absence[] = (Array.isArray(d.absences) ? d.absences : [])
-    .filter((a): a is Absence => !!a && typeof a === 'object')
-    .map((a) => {
-      const s = isoOrNull(a.start);
-      const e = isoOrNull(a.end) ?? s;
-      return {
-        id: str(a.id) || uid('a'),
-        personId: str(a.personId),
-        start: s && e && e < s ? e : s,
-        end: s && e && e < s ? s : e,
-        type: ABSENCE_TYPES.includes(a.type) ? a.type : 'OTHER',
-        note: str(a.note),
-      } as Absence;
-    })
+    .filter(isObj)
+    .map(normAbsence)
     .filter((a) => a.start && a.end && peopleIds.has(a.personId));
 
   const now = new Date().toISOString();
   const notes: Note[] = (Array.isArray(d.notes) ? d.notes : [])
-    .filter((n): n is Note => !!n && typeof n === 'object')
-    .map((n) => {
-      const createdAt = isoTime(n.createdAt, now);
-      return {
-        id: str(n.id) || uid('nt'),
-        nodeId: str(n.nodeId),
-        title: str(n.title).slice(0, 200),
-        body: sanitizeHtml(str(n.body)),
-        tags: Array.isArray(n.tags) ? parseTags(n.tags.map(String).join(',')) : [],
-        author: str(n.author),
-        createdAt,
-        updatedAt: isoTime(n.updatedAt, createdAt),
-        pinned: !!n.pinned,
-      };
-    })
+    .filter(isObj)
+    .map((n) => normNote(n, now))
     // una nota agganciata a un'attività cancellata non serve più a nessuno
     .filter((n) => nodeIds.has(n.nodeId));
 
   return { version: DATA_VERSION, people, absences, nodes, notes };
 }
 
+/** le operazioni che arrivano dagli altri utenti passano dalla stessa normalizzazione dei file */
+function cleanRemoteOp(o: Op): Op {
+  const now = new Date().toISOString();
+  if (o.op === 'replace') return { op: 'replace', data: migrate(o.data) };
+  if (o.op === 'add') {
+    const rec = o.rec as Raw;
+    const clean =
+      o.t === 'node' ? normNode(rec) : o.t === 'person' ? normPerson(rec) : o.t === 'absence' ? normAbsence(rec) : normNote(rec, now);
+    return { op: 'add', t: o.t, rec: clean as unknown as Raw & { id: string } };
+  }
+  if (o.op === 'set' && o.t === 'note' && typeof o.set.body === 'string') {
+    return { ...o, set: { ...o.set, body: sanitizeHtml(o.set.body) } };
+  }
+  return o;
+}
+
 // ---------------------------------------------------------------- stato
 
 export type SyncMode = 'browser' | 'shared';
-export type SyncRole = 'writer' | 'reader';
+
+/** avviso da mostrare (con eventuale «Rimetti il mio valore») */
+export interface Notice {
+  id: string;
+  text: TKey;
+  vars: Record<string, string | number>;
+  /** campo da rimettere com'era con un clic */
+  restore?: { t: RecordKind; id: string; field: string; value: unknown };
+  /** per formattare i valori nel testo (date, persone, stati) */
+  field?: { t: RecordKind; name: string; mine: unknown; theirs: unknown };
+}
 
 export interface SyncState {
-  /** 'shared' = archivio su file (anche di rete); 'browser' = ripiego nel browser */
+  /** 'shared' = archivio sul server (più utenti insieme); 'browser' = ripiego nel browser */
   mode: SyncMode;
   ready: boolean;
-  role: SyncRole;
+  /** serve l'accesso: prima volta, sessione scaduta o uscita */
+  needLogin: boolean;
+  /** la sessione era scaduta: lo si dice nella finestra di accesso */
+  expired: boolean;
+  session: Session | null;
   info: ServerInfo | null;
-  identity: Identity | null;
-  /** chi sta modificando adesso (null = nessuno) */
-  lock: LockInfo | null;
+  /** ultima revisione dell'archivio ricevuta dal server */
   rev: number;
-  savedAt: string | null;
-  savedBy: string | null;
+  /** canale in tempo reale attivo */
+  online: boolean;
   saving: boolean;
-  /** ci sono modifiche non ancora scritte sul file */
-  pending: boolean;
-  /** qualcun altro ha salvato mentre noi modificavamo: serve ricaricare */
-  conflict: boolean;
-  /** mostra il dialogo "documento in uso" all'apertura */
-  ask: boolean;
-  error: string | null;
-  /** dati presenti solo in questo browser, mai trasferiti sull'archivio condiviso */
+  /** operazioni non ancora confermate dal server */
+  pending: number;
+  savedAt: string | null;
+  error: TKey | null;
+  server: ServerStatus | null;
+  presence: Presence[];
+  notices: Notice[];
+  /** dati presenti solo in questo browser (versioni senza server), da trasferire */
   localOnly: AppData | null;
 }
 
 /**
- * Livello di accesso di chi sta usando il programma.
- * Senza il file `gantt-utenti.json` accanto al programma `enabled` resta false
- * e tutti lavorano come amministratori, esattamente come nelle versioni precedenti.
+ * Livello di accesso di chi sta usando il programma. Nell'archivio condiviso lo decide
+ * il server (sessione); nel browser senza server si è amministratori come sempre.
  */
 export interface AuthState {
   ready: boolean;
+  mode: AccessMode | 'browser';
+  /** controllo accessi attivo (file gantt-utenti.json) */
   enabled: boolean;
-  /** livello attuale (può essere stato sbloccato con la password) */
   level: Level;
-  /** livello che spetta a questo PC senza digitare niente */
+  /** livello senza password (modo «livelli») */
   autoLevel: Level;
   /** true se il livello automatico arriva dall'elenco dei PC */
   auto: boolean;
-  /** livelli sbloccabili con una password */
+  /** livelli sbloccabili con una password (modo «livelli») */
   levels: Level[];
-  /** come il server riconosce questo computer: si copia nell'elenco «pc» del file */
+  ospiti: boolean;
+  /** come il server riconosce questo computer */
   who: string;
-  file: string;
-  /** il file esiste ma non è stato ancora letto? serve solo per l'avviso in Impostazioni */
-  exists: boolean;
 }
 
 interface State {
@@ -218,7 +279,7 @@ function sanitizeUi(raw: Partial<UiState>): UiState {
     scale: ui.scale === 'day' || ui.scale === 'month' ? ui.scale : 'week',
     gridWidth: clamp(ui.gridWidth, 220, 1100, defaultUi.gridWidth),
     colWidths,
-    userName: str(ui.userName).slice(0, 40),
+    userName: str(ui.userName).slice(0, 80),
     home: {
       showKpi: home.showKpi !== false,
       showCalendar: home.showCalendar !== false,
@@ -265,30 +326,31 @@ let state: State = {
   sync: {
     mode: 'browser',
     ready: false,
-    role: 'writer',
+    needLogin: false,
+    expired: false,
+    session: null,
     info: null,
-    identity: null,
-    lock: null,
     rev: 0,
-    savedAt: null,
-    savedBy: null,
+    online: false,
     saving: false,
-    pending: false,
-    conflict: false,
-    ask: false,
+    pending: 0,
+    savedAt: null,
     error: null,
+    server: null,
+    presence: [],
+    notices: [],
     localOnly: null,
   },
   auth: {
     ready: false,
+    mode: 'browser',
     enabled: false,
     level: 'admin',
     autoLevel: 'admin',
     auto: true,
     levels: [],
+    ospiti: false,
     who: '',
-    file: '',
-    exists: false,
   },
 };
 
@@ -318,10 +380,20 @@ function setSync(patch: Partial<SyncState>) {
   emit();
 }
 
-/** true quando le modifiche sono permesse (siamo noi a tenere il blocco e il livello lo consente) */
+function setAuth(patch: Partial<AuthState>) {
+  state = { ...state, auth: { ...state.auth, ...patch } };
+  emit();
+}
+
+/** true quando le modifiche sono permesse: livello e server lo consentono */
+export function canEditState(s: State): boolean {
+  if (s.auth.level === 'lettura') return false;
+  if (s.sync.mode === 'browser') return true;
+  return !!s.sync.session && !s.sync.server?.readOnly;
+}
+
 export function canEdit(): boolean {
-  if (state.auth.level === 'lettura') return false;
-  return state.sync.mode === 'browser' || (state.sync.role === 'writer' && !state.sync.conflict);
+  return canEditState(state);
 }
 
 /** true per le operazioni delicate: eliminare, svuotare, gestire responsabili e assenze */
@@ -334,55 +406,67 @@ export function canAdmin(): boolean {
   return isAdmin() && canEdit();
 }
 
-function setAuth(patch: Partial<AuthState>) {
-  state = { ...state, auth: { ...state.auth, ...patch } };
-  emit();
+// ---------------------------------------------------------------- accesso
+
+function applySession(session: Session) {
+  setSync({ session, needLogin: false, expired: false });
+  setAuth({ ready: true, level: session.level });
+  if (session.user && session.user !== state.ui.userName) setUi({ userName: session.user });
 }
 
-function readSavedLevel(): Level | null {
+/** accesso con nome (e password se serve): poi si caricano i dati e si apre il tempo reale */
+export async function login(nome: string, password: string): Promise<{ ok: boolean; error?: TKey }> {
   try {
-    const v = sessionStorage.getItem(LEVEL_KEY);
-    return v === 'admin' || v === 'modifica' || v === 'lettura' ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-/** sblocca un livello superiore digitando la password: vale per questa sessione del browser */
-export async function unlockLevel(password: string): Promise<{ ok: boolean; level?: Level; error?: string }> {
-  try {
-    const r = await api.login(password);
-    if (r.ok && r.level) {
-      setAuth({ level: r.level });
-      try {
-        sessionStorage.setItem(LEVEL_KEY, r.level);
-      } catch {
-        /* niente sessionStorage: il livello vale finché non si ricarica */
-      }
-      // chi entrava in sola lettura per il livello ora può chiedere di scrivere
-      if (state.sync.mode === 'shared' && state.sync.role === 'reader' && !state.sync.lock) void takeControl();
-      return { ok: true, level: r.level };
+    const r = await api.login(nome.trim(), password);
+    applySession(r.session);
+    await startShared();
+    return { ok: true };
+  } catch (err) {
+    if (err instanceof ApiError) {
+      if (err.status === 429) return { ok: false, error: 'auth.paused' };
+      if (err.status === 400) return { ok: false, error: 'login.nameRequired' };
+      if (err.status === 403) return { ok: false, error: 'auth.wrong' };
     }
-    return { ok: false, error: r.error === 'pausa' ? 'auth.paused' : 'auth.wrong' };
-  } catch {
     return { ok: false, error: 'sync.offline' };
   }
 }
 
-/** torna al livello che spetta a questo PC (fine turno su un computer condiviso) */
-export function lockLevel() {
-  setAuth({ level: state.auth.autoLevel });
+/** esce (o cambia utente): le modifiche ancora in coda restano e partono al prossimo accesso */
+export async function logout(): Promise<void> {
   try {
-    sessionStorage.removeItem(LEVEL_KEY);
+    await api.logout();
   } catch {
-    /* niente da pulire */
+    /* sessione già chiusa */
   }
-  if (state.auth.autoLevel === 'lettura' && state.sync.mode === 'shared' && state.sync.role === 'writer') {
-    void giveUpControl();
+  stopEvents();
+  stopPresence();
+  setSync({ session: null, needLogin: true, online: false, presence: [] });
+}
+
+/** modo «livelli»: sblocca un livello superiore digitando la password (vale per questa sessione) */
+export async function unlockLevel(password: string): Promise<{ ok: boolean; level?: Level; error?: string }> {
+  try {
+    const r = await api.unlock(password);
+    applySession(r.session);
+    return { ok: true, level: r.session.level };
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 429) return { ok: false, error: 'auth.paused' };
+    if (err instanceof ApiError && err.status === 403) return { ok: false, error: 'auth.wrong' };
+    return { ok: false, error: 'sync.offline' };
   }
 }
 
-// ---------------------------------------------------------------- salvataggio
+/** torna al livello che spetta a questo PC senza password (fine turno su un computer condiviso) */
+export async function lockLevel(): Promise<void> {
+  try {
+    const r = await api.baseLevel();
+    applySession(r.session);
+  } catch {
+    /* si riproverà */
+  }
+}
+
+// ---------------------------------------------------------------- preferenze e dati locali
 
 let uiTimer: number | undefined;
 
@@ -398,7 +482,6 @@ function persistUi() {
   }, 200);
 }
 
-let dataTimer: number | undefined;
 let localWarned = false;
 
 function persistLocal() {
@@ -412,68 +495,88 @@ function persistLocal() {
   }
 }
 
-async function pushToServer() {
-  const { identity, rev, mode, role, conflict } = state.sync;
-  if (mode !== 'shared' || !identity || role !== 'writer' || conflict) return;
-  setSync({ saving: true, error: null });
+function readCollapsed(): Set<string> | null {
   try {
-    const r = await api.save(identity, rev, state.data);
-    if (r.ok && typeof r.rev === 'number') {
-      setSync({ saving: false, pending: false, rev: r.rev, savedAt: new Date().toISOString(), conflict: false });
-      return;
-    }
-    if (r.error === 'conflict') {
-      setSync({ saving: false, conflict: true, error: 'sync.conflict', savedBy: r.savedBy ?? null });
-      return;
-    }
-    if (r.error === 'locked') {
-      setSync({ saving: false, role: 'reader', lock: r.lock ?? null, error: 'sync.lostLock' });
-      return;
-    }
-    setSync({ saving: false, error: 'sync.saveFailed' });
+    const raw = localStorage.getItem(COLLAPSE_KEY);
+    const list = raw ? (JSON.parse(raw) as unknown) : null;
+    return Array.isArray(list) ? new Set(list.map(String)) : null;
   } catch {
-    // rete o cartella momentaneamente non raggiungibile: si riprova al prossimo salvataggio
-    setSync({ saving: false, error: 'sync.offline' });
+    return null;
   }
 }
 
-function persistData() {
-  if (state.sync.mode === 'browser') {
-    persistLocal();
-    return;
+function saveCollapsed() {
+  try {
+    const ids = state.data.nodes.filter((n) => n.collapsed).map((n) => n.id);
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(ids));
+  } catch {
+    /* preferenza non salvata: pazienza */
   }
-  setSync({ pending: true });
-  if (typeof window === 'undefined') return;
-  window.clearTimeout(dataTimer);
-  dataTimer = window.setTimeout(() => void pushToServer(), 700);
 }
 
-/** salvataggio immediato (usato prima della chiusura della pagina) */
-export function flushPersist() {
-  if (typeof window !== 'undefined') window.clearTimeout(dataTimer);
-  if (state.sync.mode === 'browser') persistLocal();
-  else if (state.sync.pending) void pushToServer();
+/** applica ai dati appena arrivati i rami aperti/chiusi scelti in questo browser */
+function withLocalCollapse(data: AppData, from: Set<string> | null = readCollapsed()): AppData {
+  if (!from) return data;
+  return { ...data, nodes: data.nodes.map((n) => (n.collapsed === from.has(n.id) ? n : { ...n, collapsed: from.has(n.id) })) };
 }
 
-/** modifica dei dati con snapshot per undo */
-function mutate(fn: (d: AppData) => AppData | void, history = true) {
+const currentCollapsed = () => new Set(state.data.nodes.filter((n) => n.collapsed).map((n) => n.id));
+
+/** aprire o chiudere rami: nell'archivio condiviso è una scelta personale (vale anche in sola lettura) */
+function setCollapsedLocal(ids: string[], collapsed: boolean) {
+  const set = new Set(ids);
+  state = {
+    ...state,
+    data: { ...state.data, nodes: state.data.nodes.map((n) => (set.has(n.id) && n.collapsed !== collapsed ? { ...n, collapsed } : n)) },
+  };
+  saveCollapsed();
+  emit();
+}
+
+const onlyCollapse = (patch: Partial<TaskNode>) => Object.keys(patch).every((k) => k === 'collapsed');
+
+// ---------------------------------------------------------------- modifiche e annulla
+
+const cloneData = (d: AppData): AppData => JSON.parse(JSON.stringify(d));
+
+/** dati da mandare al server (il campo «collapsed» resta nel browser) */
+const sharedData = (d: AppData): AppData => ({
+  ...d,
+  nodes: d.nodes.map((n) => ({ ...n, collapsed: false })),
+});
+
+/** modifica dei dati con istantanea per «annulla» */
+function mutate(fn: (d: AppData) => AppData | void, history = true, opts: { replace?: boolean } = {}) {
   if (!canEdit()) {
     setSync({ error: 'sync.readOnlyBlocked' });
     return;
   }
-  const snapshot: AppData = JSON.parse(JSON.stringify(state.data));
-  const next = fn(state.data as AppData);
-  const newData = (next as AppData) ?? state.data;
+  const before = cloneData(state.data);
+  const next = (fn(state.data as AppData) as AppData | undefined) ?? state.data;
+  const after: AppData = {
+    ...next,
+    nodes: [...next.nodes],
+    people: [...next.people],
+    absences: [...next.absences],
+    notes: [...next.notes],
+  };
   if (history) {
-    past = [...past.slice(-49), snapshot];
+    past = [...past.slice(-49), before];
     future = [];
   }
-  state = {
-    ...state,
-    data: { ...newData, nodes: [...newData.nodes], people: [...newData.people], notes: [...newData.notes] },
-  };
-  persistData();
+  state = { ...state, data: after };
+  afterChange(before, after, opts.replace);
   emit();
+}
+
+/** dopo ogni modifica: nel browser si salva subito; sul server si mandano solo i record cambiati */
+function afterChange(before: AppData, after: AppData, replace = false) {
+  if (state.sync.mode === 'browser') {
+    persistLocal();
+    return;
+  }
+  const ops: Op[] = replace ? [{ op: 'replace', data: sharedData(after) }] : diffOps(before, after);
+  if (ops.length) enqueue(ops);
 }
 
 export function setUi(patch: Partial<UiState>) {
@@ -494,13 +597,18 @@ export function resetColWidths() {
   setUi({ colWidths: {} });
 }
 
+/**
+ * Annulla l'ultima modifica PROPRIA. Le modifiche arrivate dagli altri vengono riportate
+ * anche nelle istantanee (vedi applyRemote): annullare non cancella il lavoro altrui.
+ */
 export function undo() {
   if (!past.length || !canEdit()) return;
   const prev = past[past.length - 1];
   past = past.slice(0, -1);
-  future = [JSON.parse(JSON.stringify(state.data)), ...future.slice(0, 49)];
-  state = { ...state, data: prev };
-  persistData();
+  const current = cloneData(state.data);
+  future = [current, ...future.slice(0, 49)];
+  state = { ...state, data: withLocalCollapse(prev, currentCollapsed()) };
+  afterChange(current, state.data);
   emit();
 }
 
@@ -508,9 +616,10 @@ export function redo() {
   if (!future.length || !canEdit()) return;
   const next = future[0];
   future = future.slice(1);
-  past = [...past, JSON.parse(JSON.stringify(state.data))];
-  state = { ...state, data: next };
-  persistData();
+  const current = cloneData(state.data);
+  past = [...past, current];
+  state = { ...state, data: withLocalCollapse(next, currentCollapsed()) };
+  afterChange(current, state.data);
   emit();
 }
 
@@ -521,93 +630,349 @@ export function canRedo() {
   return future.length > 0;
 }
 
-// ---------------------------------------------------------------- avvio e sincronizzazione
+// ---------------------------------------------------------------- coda dei salvataggi
 
-function newSessionId(): string {
-  try {
-    const existing = sessionStorage.getItem(SESSION_KEY);
-    if (existing) return existing;
-    const id = uid('s');
-    sessionStorage.setItem(SESSION_KEY, id);
-    return id;
-  } catch {
-    return uid('s');
-  }
+interface Batch {
+  id: string;
+  ops: Op[];
 }
 
-let heartbeatTimer: number | undefined;
-let pollTimer: number | undefined;
+/** gruppi di operazioni da mandare, nell'ordine; uno solo alla volta è «in viaggio» */
+let queue: Batch[] = [];
+let inflight: Batch | null = null;
+let retryTimer: number | undefined;
+let retryDelay = 0;
 
-function stopTimers() {
-  window.clearInterval(heartbeatTimer);
-  window.clearInterval(pollTimer);
+const pendingCount = () => queue.reduce((s, b) => s + b.ops.length, inflight?.ops.length ?? 0);
+
+function enqueue(ops: Op[]) {
+  const last = queue[queue.length - 1];
+  // le modifiche ravvicinate partono insieme (es. il titolo di una nota mentre si scrive)
+  if (last && last.ops.length + ops.length <= 5000) last.ops.push(...ops);
+  else queue.push({ id: uid('b'), ops });
+  setSync({ pending: pendingCount() });
+  void pump();
 }
 
-async function poll() {
-  const { identity, mode } = state.sync;
-  if (mode !== 'shared' || !identity) return;
+async function pump(): Promise<void> {
+  if (inflight || !queue.length || state.sync.needLogin || retryTimer !== undefined) return;
+  const batch = queue.shift()!;
+  inflight = batch;
+  setSync({ saving: true });
   try {
-    const s = await api.status();
-    const lock = s.lock ?? null;
-    const holdsLock = !!lock && lock.sessionId === identity.sessionId;
-
-    if (state.sync.role === 'writer' && !holdsLock && lock && !lock.stale) {
-      // qualcuno è subentrato mentre eravamo fermi
-      setSync({ role: 'reader', lock, error: 'sync.lostLock' });
-      await reload();
+    const r = await api.ops({ client: CLIENT_ID, batch: batch.id, ops: batch.ops });
+    inflight = null;
+    retryDelay = 0;
+    handleOpsResponse(r);
+    setSync({
+      saving: false,
+      pending: pendingCount(),
+      savedAt: new Date().toISOString(),
+      error: state.sync.error === 'sync.offline' ? null : state.sync.error,
+    });
+  } catch (err) {
+    inflight = null;
+    const status = err instanceof ApiError ? err.status : 0;
+    if (status === 401) {
+      queue.unshift(batch);
+      stopEvents();
+      setSync({ saving: false, needLogin: true, expired: true, online: false });
       return;
     }
-    setSync({ lock, savedBy: s.savedBy ?? state.sync.savedBy });
-
-    if (state.sync.role === 'reader' && s.rev !== state.sync.rev) await reload();
-  } catch {
-    setSync({ error: 'sync.offline' });
-  }
-}
-
-async function beat() {
-  const { identity, role, mode } = state.sync;
-  if (mode !== 'shared' || !identity || role !== 'writer') return;
-  try {
-    const r = await api.heartbeat(identity.sessionId);
-    if (!r.ok && r.reason === 'lost') {
-      setSync({ role: 'reader', lock: r.lock ?? null, error: 'sync.lostLock' });
+    if (status === 400 || status === 403) {
+      // modifica rifiutata (livello o dati non validi): si torna allo stato vero del server
+      setSync({ saving: false, pending: pendingCount(), error: status === 403 ? 'auth.needAdmin' : 'sync.rejected' });
       await reload();
-    } else if (r.lock) {
-      setSync({ lock: r.lock, error: state.sync.error === 'sync.offline' ? null : state.sync.error });
+    } else {
+      // rete o server momentaneamente non raggiungibili: si riprova, nulla va perso
+      queue.unshift(batch);
+      retryDelay = Math.min(30_000, retryDelay ? retryDelay * 2 : 1500);
+      setSync({ saving: false, pending: pendingCount(), error: status === 503 ? 'sync.readOnlyBlocked' : 'sync.offline' });
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        void pump();
+      }, retryDelay);
+      return;
     }
-  } catch {
-    /* un battito perso non è un problema: il blocco dura più di due battiti */
   }
+  void pump();
 }
 
-function startTimers() {
-  stopTimers();
-  const every = state.sync.info?.heartbeatMs ?? 25_000;
-  heartbeatTimer = window.setInterval(() => void beat(), every);
-  pollTimer = window.setInterval(() => void poll(), 8_000);
+/** il server ha saltato qualcosa (record eliminato da altri…): si corregge e si avvisa */
+function handleOpsResponse(r: OpsResponse) {
+  if (r.fix?.length) {
+    const data = copyLists(state.data);
+    for (const f of r.fix as Fix[]) {
+      const list = data[KINDS[f.t]] as unknown as Array<{ id: string; collapsed?: boolean }>;
+      if ('deleted' in f) {
+        const i = list.findIndex((x) => x.id === f.id);
+        if (i >= 0) list.splice(i, 1);
+      } else {
+        const clean = (cleanRemoteOp({ op: 'add', t: f.t, rec: f.rec }) as Extract<Op, { op: 'add' }>).rec as {
+          id: string;
+          collapsed?: boolean;
+        };
+        const i = list.findIndex((x) => x.id === clean.id);
+        if (i >= 0) list[i] = f.t === 'node' ? { ...clean, collapsed: list[i].collapsed } : clean;
+        else list.push(clean);
+      }
+    }
+    state = { ...state, data };
+    ensureSelection();
+  }
+  for (const s of r.skipped ?? []) {
+    if (s.reason !== 'eliminato') continue;
+    pushNotice({
+      text: s.by ? 'notice.deleted' : 'notice.deletedUnknown',
+      vars: { name: s.label || '…', user: s.by ?? '' },
+    });
+  }
+  emit();
 }
 
-/** rilegge i dati dal file condiviso (dopo un conflitto o quando un altro utente salva) */
+// ---------------------------------------------------------------- avvisi
+
+function pushNotice(n: Omit<Notice, 'id'>) {
+  setSync({ notices: [...state.sync.notices.slice(-4), { ...n, id: uid('av') }] });
+}
+
+export function dismissNotice(id: string) {
+  setSync({ notices: state.sync.notices.filter((n) => n.id !== id) });
+}
+
+/** «Rimetti il mio valore»: riscrive il valore che un altro utente ha appena sostituito */
+export function restoreValue(notice: Notice) {
+  const r = notice.restore;
+  dismissNotice(notice.id);
+  if (!r) return;
+  mutate((d) => {
+    const key = KINDS[r.t];
+    (d as unknown as Record<string, Array<{ id: string }>>)[key] = (d[key] as unknown as Array<{ id: string }>).map((x) =>
+      x.id === r.id ? { ...x, [r.field]: r.value } : x,
+    );
+  });
+}
+
+export function dismissSyncError() {
+  setSync({ error: null });
+}
+
+// ---------------------------------------------------------------- modifiche degli altri
+
+/** campi con modifiche locali non ancora confermate: un evento altrui non li tocca */
+function pendingFields() {
+  const map = new Map<string, Set<string>>();
+  for (const b of inflight ? [inflight, ...queue] : queue) {
+    for (const o of b.ops) {
+      if (o.op !== 'set') continue;
+      const k = keyOf(o.t, o.id);
+      const s = map.get(k) ?? new Set<string>();
+      for (const f of Object.keys(o.set)) s.add(f);
+      map.set(k, s);
+    }
+  }
+  return (t: RecordKind, id: string) => map.get(keyOf(t, id));
+}
+
+const copyLists = (d: AppData): AppData => ({
+  ...d,
+  nodes: [...d.nodes],
+  people: [...d.people],
+  absences: [...d.absences],
+  notes: [...d.notes],
+});
+
+/** applica un salvataggio di un altro utente: dati, istantanee di «annulla», avvisi */
+function applyRemote(ev: BatchEvent) {
+  if (ev.rev <= state.sync.rev) return;
+  if (ev.rev !== state.sync.rev + 1) {
+    void reload(); // ci siamo persi qualcosa: si ricarica tutto
+    return;
+  }
+  if (ev.client !== CLIENT_ID) {
+    const ops = ev.ops.map(cleanRemoteOp);
+    const collapsed = currentCollapsed();
+    const data = copyLists(state.data);
+    applyOps(data, ops, { keep: pendingFields() });
+    for (const snap of past) applyOps(snap, ops);
+    for (const snap of future) applyOps(snap, ops);
+    state = { ...state, data: ops.some((o) => o.op === 'replace') ? withLocalCollapse(data, collapsed) : data };
+    ensureSelection();
+  }
+  const mine = state.sync.session?.id;
+  for (const o of ev.overwrote ?? []) {
+    if (o.sid !== mine || ev.sid === mine) continue;
+    const newValue = ev.ops.find((x) => x.op === 'set' && x.t === o.t && x.id === o.id) as Extract<Op, { op: 'set' }> | undefined;
+    pushNotice({
+      text: 'notice.overwritten',
+      vars: { user: ev.user, name: o.label || '…' },
+      restore: { t: o.t, id: o.id, field: o.field, value: o.value },
+      field: { t: o.t, name: o.field, mine: o.value, theirs: newValue?.set[o.field] ?? null },
+    });
+  }
+  state = { ...state, sync: { ...state.sync, rev: ev.rev } };
+  emit();
+}
+
+/** rilegge tutto dal server (dopo un buco nella sequenza, un rifiuto o un riavvio del server) */
 export async function reload(): Promise<void> {
   if (state.sync.mode !== 'shared') return;
   try {
     const s = await api.state();
+    const collapsed = state.data.nodes.length ? currentCollapsed() : readCollapsed();
+    const data = withLocalCollapse(migrate(s.data), collapsed);
+    // le modifiche ancora in coda si rimettono sopra: partiranno comunque
+    for (const b of inflight ? [inflight, ...queue] : queue) applyOps(data, b.ops.filter((o) => o.op !== 'replace'));
     past = [];
     future = [];
-    state = { ...state, data: migrate(s.data) };
-    setSync({
-      rev: s.rev,
-      savedAt: s.savedAt,
-      savedBy: s.savedBy,
-      lock: s.lock ?? null,
-      conflict: false,
-      pending: false,
-      error: null,
-    });
+    state = { ...state, data };
+    setSync({ rev: s.rev, savedAt: s.savedAt, server: { health: s.health, readOnly: s.readOnly } });
     ensureSelection();
-  } catch {
-    setSync({ error: 'sync.offline' });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) setSync({ needLogin: true, expired: true });
+    else setSync({ error: 'sync.offline' });
+  }
+}
+
+// ---------------------------------------------------------------- tempo reale
+
+let source: EventSource | null = null;
+let pollTimer: number | undefined;
+let pollMs = 2500;
+let sseFailures = 0;
+let lastEventAt = 0;
+let watchdog: number | undefined;
+/** il server manda un «ping» ogni 25 s: senza notizie per più di 70 s il canale è bloccato */
+const SILENCE_MS = 70_000;
+
+/** solo per i test: intervallo del ripiego senza canale in tempo reale */
+export function setPollInterval(ms: number) {
+  pollMs = ms;
+}
+
+function stopEvents() {
+  source?.close();
+  source = null;
+  if (typeof window !== 'undefined') {
+    window.clearTimeout(pollTimer);
+    window.clearInterval(watchdog);
+  }
+  pollTimer = undefined;
+}
+
+function startEvents() {
+  stopEvents();
+  if (typeof EventSource === 'undefined' || sseFailures >= 4) {
+    startPolling();
+    return;
+  }
+  const es = new EventSource(eventsUrl(state.sync.rev, CLIENT_ID));
+  source = es;
+  lastEventAt = Date.now();
+  const parse = (e: Event) => {
+    lastEventAt = Date.now();
+    return JSON.parse((e as MessageEvent<string>).data);
+  };
+  es.addEventListener('open', () => {
+    sseFailures = 0;
+    lastEventAt = Date.now();
+    setSync({ online: true, error: state.sync.error === 'sync.offline' ? null : state.sync.error });
+  });
+  // un proxy che trattiene il canale (buffer) non dà errori ma nemmeno eventi: si ripiega
+  watchdog = window.setInterval(() => {
+    if (source === es && Date.now() - lastEventAt > SILENCE_MS) {
+      sseFailures = 4;
+      startEvents();
+    }
+  }, 15_000);
+  es.addEventListener('ping', (e) => void parse(e));
+  es.addEventListener('batch', (e) => applyRemote(parse(e) as BatchEvent));
+  es.addEventListener('presenza', (e) => setSync({ presence: parse(e) as Presence[] }));
+  es.addEventListener('server', (e) => setSync({ server: parse(e) as ServerStatus }));
+  es.addEventListener('reload', () => void reload());
+  es.addEventListener('sessione', () => {
+    stopEvents();
+    setSync({ online: false, needLogin: true, expired: true });
+  });
+  es.onerror = () => {
+    setSync({ online: false });
+    sseFailures += 1;
+    // un proxy che blocca il canale: si passa alle richieste periodiche
+    if (sseFailures >= 4) startEvents();
+  };
+}
+
+function startPolling() {
+  const tick = async () => {
+    pollTimer = undefined;
+    if (state.sync.needLogin || state.sync.mode !== 'shared') return;
+    try {
+      const r = await api.poll(state.sync.rev, CLIENT_ID);
+      if (r.reload) await reload();
+      else for (const ev of r.batches) applyRemote(ev);
+      setSync({ presence: r.presence, server: r.server, online: true });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setSync({ online: false, needLogin: true, expired: true });
+        return;
+      }
+      setSync({ online: false });
+    }
+    pollTimer = window.setTimeout(() => void tick(), pollMs);
+  };
+  void tick();
+}
+
+// ---------------------------------------------------------------- presenze
+
+interface Where {
+  page: string | null;
+  project: string | null;
+  node: string | null;
+  field: string | null;
+  note: string | null;
+}
+
+let where: Where = { page: null, project: null, node: null, field: null, note: null };
+let presenceTimer: number | undefined;
+let presenceBeat: number | undefined;
+
+function sendPresence() {
+  if (state.sync.mode !== 'shared' || !state.sync.session || state.sync.needLogin) return;
+  void api.presence({ client: CLIENT_ID, ...where }).catch(() => {});
+}
+
+/** dove si trova l'utente: lo vedono gli altri (progetto aperto, riga o nota in modifica) */
+export function reportPresence(patch: Partial<Where>) {
+  where = { ...where, ...patch };
+  if (typeof window === 'undefined') return;
+  window.clearTimeout(presenceTimer);
+  presenceTimer = window.setTimeout(sendPresence, 200);
+}
+
+function startPresence() {
+  stopPresence();
+  sendPresence();
+  presenceBeat = window.setInterval(sendPresence, 20_000);
+}
+
+function stopPresence() {
+  if (typeof window === 'undefined') return;
+  window.clearInterval(presenceBeat);
+  window.clearTimeout(presenceTimer);
+}
+
+// ---------------------------------------------------------------- avvio
+
+/** salvataggio immediato alla chiusura della pagina */
+export function flushPersist() {
+  if (state.sync.mode === 'browser') {
+    persistLocal();
+    return;
+  }
+  if (!inflight && queue.length) {
+    const ops = queue.flatMap((b) => b.ops);
+    if (sendOpsOnUnload({ client: CLIENT_ID, batch: queue[0].id, ops })) queue = [];
   }
 }
 
@@ -619,90 +984,32 @@ function ensureSelection() {
   }
 }
 
-/** chiede il blocco di scrittura; `force` subentra a un blocco abbandonato */
-export async function takeControl(force = false): Promise<boolean> {
-  const { identity, mode } = state.sync;
-  if (state.auth.level === 'lettura') return false;
-  if (mode !== 'shared' || !identity) return true;
-  try {
-    const r = await api.lock(identity, force);
-    if (r.ok) {
-      await reload();
-      setSync({ role: 'writer', lock: r.lock ?? null, ask: false, error: null });
-      return true;
-    }
-    setSync({ role: 'reader', lock: r.lock ?? null, error: 'sync.busy' });
-    return false;
-  } catch {
-    setSync({ error: 'sync.offline' });
-    return false;
+let loadedOnce = false;
+
+/** dopo l'accesso: dati (la prima volta o dopo una sessione scaduta), tempo reale, presenze, coda */
+async function startShared() {
+  if (!loadedOnce) {
+    const s = await api.state();
+    const data = withLocalCollapse(migrate(s.data));
+    const localData = readLocalData();
+    // il travaso dei dati del browser si propone solo se l'archivio condiviso è ancora vuoto
+    const localOnly = canEdit() && isEmpty(data) && localData && !isEmpty(localData) ? localData : null;
+    state = { ...state, data };
+    ensureSelection();
+    setSync({ ready: true, rev: s.rev, savedAt: s.savedAt, server: { health: s.health, readOnly: s.readOnly }, localOnly });
+    loadedOnce = true;
+  } else {
+    await reload();
   }
-}
-
-/** chiede a chi sta scrivendo di lasciare il posto */
-export async function askForControl(): Promise<void> {
-  const { identity, mode } = state.sync;
-  if (mode !== 'shared' || !identity) return;
-  try {
-    const r = await api.requestControl(identity);
-    if (r.free) await takeControl();
-    else setSync({ error: 'sync.requested' });
-  } catch {
-    setSync({ error: 'sync.offline' });
-  }
-}
-
-/** chi sta scrivendo cede il posto e passa in sola lettura */
-export async function giveUpControl(): Promise<void> {
-  const { identity, mode, role } = state.sync;
-  if (mode !== 'shared' || !identity || role !== 'writer') return;
-  flushPersist();
-  try {
-    await api.yieldControl(identity.sessionId);
-  } catch {
-    /* il blocco scade comunque da solo */
-  }
-  setSync({ role: 'reader', lock: null, error: null });
-}
-
-export function continueReadOnly() {
-  setSync({ ask: false });
-}
-
-/** il nome mostrato agli altri utenti: si aggiorna anche nel blocco già acquisito */
-export function setUserName(name: string) {
-  const clean = name.slice(0, 40);
-  setUi({ userName: clean });
-  const { identity, mode, role } = state.sync;
-  if (mode !== 'shared' || !identity) return;
-  const next: Identity = { ...identity, user: clean.trim() || identity.user };
-  setSync({ identity: next });
-  if (role === 'writer') void api.lock(next).catch(() => {});
-}
-
-export function dismissSyncError() {
-  setSync({ error: null });
-}
-
-/** trasferisce sull'archivio condiviso i dati rimasti nel browser di questo PC */
-export async function uploadLocalData(): Promise<boolean> {
-  const local = state.sync.localOnly;
-  if (!local || state.sync.role !== 'writer') return false;
-  state = { ...state, data: local };
-  setSync({ localOnly: null });
-  ensureSelection();
-  await pushToServer();
-  return true;
-}
-
-export function dismissLocalData() {
-  setSync({ localOnly: null });
+  startEvents();
+  startPresence();
+  void pump();
 }
 
 /**
  * Prepara lo stato prima di disegnare l'interfaccia.
- * Se il server risponde i dati vengono dal file condiviso, altrimenti si continua
- * a lavorare nel browser come nelle versioni precedenti.
+ * Se il server risponde i dati vengono dall'archivio condiviso (dopo l'accesso), altrimenti
+ * si continua a lavorare nel browser come nelle versioni precedenti.
  */
 export async function initStore(): Promise<void> {
   const ui = readLocalUi();
@@ -719,108 +1026,45 @@ export async function initStore(): Promise<void> {
     const data = readLocalData() ?? demoData();
     state = { ...state, data };
     ensureSelection();
-    setAuth({ ready: true });
-    setSync({ mode: 'browser', ready: true, role: 'writer' });
+    setAuth({ ready: true, mode: 'browser' });
+    setSync({ mode: 'browser', ready: true });
     return;
   }
 
-  // livello di accesso: senza gantt-utenti.json resta «admin» per tutti
-  try {
-    const a = await api.auth();
-    const saved = readSavedLevel();
-    const level =
-      a.enabled && saved && a.levels.includes(saved) && LEVEL_ORDER[saved] > LEVEL_ORDER[a.level] ? saved : a.level;
-    setAuth({
-      ready: true,
-      enabled: a.enabled,
-      level,
-      autoLevel: a.level,
-      auto: a.auto,
-      levels: a.levels,
-      who: a.who,
-      file: a.file,
-      exists: a.exists,
-    });
-  } catch {
-    setAuth({ ready: true });
-  }
+  const a = info.access;
+  setAuth({
+    mode: a.mode,
+    // finché il server non conferma la sessione non si mostra nessun livello di privilegio
+    level: 'lettura',
+    enabled: a.mode !== 'aperto',
+    autoLevel: a.autoLevel,
+    auto: a.auto,
+    levels: a.levels,
+    ospiti: a.ospiti,
+    who: a.who,
+  });
+  setSync({ mode: 'shared', info, server: info.status });
 
-  const identity: Identity = {
-    sessionId: newSessionId(),
-    user: ui.userName.trim() || info.server.user,
-    host: info.server.host,
-  };
-  if (!ui.userName.trim()) state = { ...state, ui: { ...state.ui, userName: identity.user } };
-
-  let remote: AppData = emptyData();
-  let rev = 0;
-  let savedAt: string | null = null;
-  let savedBy: string | null = null;
-  let lock: LockInfo | null = null;
   try {
-    const s = await api.state();
-    remote = migrate(s.data);
-    rev = s.rev;
-    savedAt = s.savedAt;
-    savedBy = s.savedBy;
-    lock = s.lock ?? null;
-  } catch {
-    // il server risponde ma l'archivio non è leggibile: meglio non toccare nulla
-    state = { ...state, data: emptyData() };
-    setSync({ mode: 'shared', ready: true, role: 'reader', info, identity, error: 'sync.readFailed' });
+    const r = await api.session();
+    applySession(r.session);
+    await startShared();
     return;
-  }
-
-  const busy = !!lock && lock.sessionId !== identity.sessionId && !lock.stale && !lock.yielded;
-  let role: SyncRole = 'reader';
-  // chi entra in sola lettura per il livello di accesso non toglie il posto agli altri
-  if (!busy && state.auth.level !== 'lettura') {
-    try {
-      const r = await api.lock(identity);
-      if (r.ok) {
-        role = 'writer';
-        lock = r.lock ?? null;
-      } else {
-        lock = r.lock ?? lock;
-      }
-    } catch {
-      /* si resta in sola lettura */
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 401)) {
+      setSync({ ready: true, error: 'sync.readFailed' });
+      setAuth({ ready: true });
+      return;
     }
   }
-
-  const localData = readLocalData();
-  // il travaso dei dati del browser si propone solo a chi può scrivere e solo se
-  // l'archivio condiviso è ancora vuoto: altrimenti si rischia di sovrascrivere il lavoro altrui
-  const localOnly =
-    role === 'writer' && isEmpty(remote) && localData && !isEmpty(localData) ? localData : null;
-
-  state = { ...state, data: remote };
-  ensureSelection();
-  setSync({
-    mode: 'shared',
-    ready: true,
-    role,
-    info,
-    identity,
-    lock,
-    rev,
-    savedAt,
-    savedBy,
-    ask: busy && state.auth.level !== 'lettura',
-    localOnly,
-  });
-
-  // Nota: un archivio condiviso vuoto non viene riempito da solo con i dati di esempio.
-  // Se lo facesse, chi apre il programma da un indirizzo diverso (porta occupata) non
-  // vedrebbe più la proposta di travasare i propri progetti dal browser.
-  // Il pulsante «Carica dati di esempio» resta nella barra laterale finché non c'è nulla.
-
-  startTimers();
-
-  window.addEventListener('pagehide', () => {
-    if (state.sync.pending) void pushToServer();
-    if (state.sync.role === 'writer' && state.sync.identity) releaseOnUnload(state.sync.identity.sessionId);
-  });
+  // senza account personali si entra da soli con il nome già usato su questo PC
+  // (il livello è quello di base: per alzarlo c'è il lucchetto in alto)
+  if ((a.mode === 'aperto' || a.mode === 'livelli') && ui.userName.trim()) {
+    const r = await login(ui.userName, '');
+    if (r.ok) return;
+  }
+  setAuth({ ready: true });
+  setSync({ ready: true, needLogin: true });
 }
 
 // ---------------------------------------------------------------- azioni albero
@@ -861,12 +1105,24 @@ export function addNode(parentId: string | null, name: string, afterId?: string 
 }
 
 export function updateNode(id: string, patch: Partial<TaskNode>, history = true) {
+  if (state.sync.mode === 'shared' && onlyCollapse(patch)) {
+    setCollapsedLocal([id], !!patch.collapsed);
+    return;
+  }
   mutate((d) => {
     d.nodes = d.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n));
   }, history);
 }
 
 export function updateNodes(patches: Record<string, Partial<TaskNode>>, history = true) {
+  const entries = Object.entries(patches);
+  if (state.sync.mode === 'shared' && entries.length && entries.every(([, p]) => onlyCollapse(p))) {
+    const open = entries.filter(([, p]) => !p.collapsed).map(([id]) => id);
+    const close = entries.filter(([, p]) => p.collapsed).map(([id]) => id);
+    if (open.length) setCollapsedLocal(open, false);
+    if (close.length) setCollapsedLocal(close, true);
+    return;
+  }
   mutate((d) => {
     d.nodes = d.nodes.map((n) => (patches[n.id] ? { ...n, ...patches[n.id] } : n));
   }, history);
@@ -878,7 +1134,7 @@ export function deleteNode(id: string) {
     d.nodes = d.nodes.filter((n) => !kill.has(n.id));
     d.notes = d.notes.filter((n) => !kill.has(n.nodeId));
   });
-  if (state.ui.selectedProjectId === id) {
+  if (state.ui.selectedProjectId === id && !state.data.nodes.some((n) => n.id === id)) {
     const first =
       state.data.nodes.find((n) => n.parentId === null && !n.archived) ??
       state.data.nodes.find((n) => n.parentId === null);
@@ -907,6 +1163,7 @@ export function indentNode(id: string) {
     rest.splice(idx + 1, 0, moved);
     d.nodes = rest;
   });
+  if (state.sync.mode === 'shared') saveCollapsed();
 }
 
 /** porta il nodo allo stesso livello del genitore */
@@ -954,13 +1211,24 @@ export function moveNode(id: string, dir: -1 | 1) {
 }
 
 export function setCollapsedAll(rootId: string | null, collapsed: boolean) {
+  const ids = rootId ? [rootId, ...descendantIds(state.data.nodes, rootId)] : state.data.nodes.map((n) => n.id);
+  if (state.sync.mode === 'shared') {
+    setCollapsedLocal(ids, collapsed);
+    return;
+  }
+  const set = new Set(ids);
   mutate((d) => {
-    const ids = rootId ? new Set([rootId, ...descendantIds(d.nodes, rootId)]) : null;
-    d.nodes = d.nodes.map((n) => (!ids || ids.has(n.id) ? { ...n, collapsed } : n));
+    d.nodes = d.nodes.map((n) => (set.has(n.id) ? { ...n, collapsed } : n));
   }, false);
 }
 
 export function toggleCollapsed(id: string) {
+  const node = state.data.nodes.find((n) => n.id === id);
+  if (!node) return;
+  if (state.sync.mode === 'shared') {
+    setCollapsedLocal([id], !node.collapsed);
+    return;
+  }
   mutate((d) => {
     d.nodes = d.nodes.map((n) => (n.id === id ? { ...n, collapsed: !n.collapsed } : n));
   }, false);
@@ -998,7 +1266,7 @@ export function addNote(nodeId: string, patch: Partial<Note> = {}): string {
     title: patch.title ?? '',
     body: sanitizeHtml(patch.body ?? ''),
     tags: patch.tags ?? [],
-    author: patch.author ?? state.ui.userName.trim(),
+    author: patch.author ?? (state.sync.session?.user ?? state.ui.userName.trim()),
     createdAt: now,
     updatedAt: now,
     pinned: !!patch.pinned,
@@ -1088,7 +1356,7 @@ export function deletePerson(id: string) {
 // ---------------------------------------------------------------- import/export
 
 export function replaceData(data: Partial<AppData>) {
-  mutate(() => migrate(data));
+  mutate(() => migrate(data), true, { replace: true });
   const first = state.data.nodes.find((n) => n.parentId === null && !n.archived);
   setUi({ selectedProjectId: first?.id ?? null });
 }
@@ -1096,6 +1364,8 @@ export function replaceData(data: Partial<AppData>) {
 /**
  * Aggiunge progetti/persone/assenze/note ai dati esistenti senza cancellare nulla.
  * Gli id in conflitto vengono rimappati, così due backup diversi convivono.
+ * Nell'archivio condiviso le assenze le gestisce solo l'amministratore: per gli altri
+ * livelli vengono lasciate fuori (il conteggio restituito lo dice).
  */
 export function mergeData(incoming: Partial<AppData>): {
   projects: number;
@@ -1140,9 +1410,18 @@ export function mergeData(incoming: Partial<AppData>): {
     if (n.assigneeId) n.assigneeId = remap[n.assigneeId] ?? null;
   }
 
-  const newAbsences: Absence[] = add.absences
-    .map((a) => ({ ...a, id: uid('a'), personId: remap[a.personId] ?? a.personId }))
-    .filter((a) => usedPersonIds.has(a.personId));
+  // la stessa assenza (persona, date, motivo) aggiunta due volte non si raddoppia:
+  // i giorni di ferie dell'anno si sommano assenza per assenza
+  const absKey = (a: Absence) => `${a.personId}|${a.start}|${a.end}|${a.type}`;
+  const knownAbsences = new Set(existing.absences.map(absKey));
+  const newAbsences: Absence[] = [];
+  const absencesAllowed = state.sync.mode === 'browser' || isAdmin();
+  for (const a of absencesAllowed ? add.absences : []) {
+    const mapped: Absence = { ...a, id: uid('a'), personId: remap[a.personId] ?? a.personId };
+    if (!usedPersonIds.has(mapped.personId) || knownAbsences.has(absKey(mapped))) continue;
+    knownAbsences.add(absKey(mapped));
+    newAbsences.push(mapped);
+  }
 
   const newNotes: Note[] = add.notes
     .map((n) => ({ ...n, id: uid('nt'), nodeId: remap[n.nodeId] ?? n.nodeId }))
@@ -1167,6 +1446,25 @@ export function mergeData(incoming: Partial<AppData>): {
     absences: newAbsences.length,
     notes: newNotes.length,
   };
+}
+
+/** browser senza server: nome dell'autore delle note (nell'archivio condiviso vale l'accesso) */
+export function setUserName(name: string) {
+  setUi({ userName: name.slice(0, 80) });
+}
+
+/** trasferisce sull'archivio condiviso i dati rimasti nel browser di questo PC */
+export async function uploadLocalData(): Promise<boolean> {
+  const local = state.sync.localOnly;
+  if (!local || !canEdit()) return false;
+  setSync({ localOnly: null });
+  mutate(() => migrate(local));
+  ensureSelection();
+  return true;
+}
+
+export function dismissLocalData() {
+  setSync({ localOnly: null });
 }
 
 export function resetAll() {

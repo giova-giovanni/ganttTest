@@ -2,7 +2,8 @@ import React from 'react';
 import { Gantt, DAY_WIDTH, ganttRange, type GanttRow, type Scale } from './Gantt';
 import { TreeGrid } from './TreeGrid';
 import { NotesPanel } from './Notes';
-import { fmtHours, useCanEdit, useT } from '../ui';
+import { fmtHours, useCanEdit, useOthers, useT } from '../ui';
+import type { Presence } from '../utils/api';
 import {
   addNode,
   deleteNode,
@@ -60,6 +61,12 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
   const gridRef = React.useRef<HTMLDivElement | null>(null);
   const ganttRef = React.useRef<HTMLDivElement | null>(null);
   const lock = React.useRef(false);
+  const others = useOthers();
+  const editedBy = React.useMemo(() => {
+    const m: Record<string, Presence> = {};
+    for (const p of others) if (p.node) m[p.node] = p;
+    return m;
+  }, [others]);
 
   React.useEffect(() => {
     setSelectedId(rootId);
@@ -383,6 +390,7 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
           scrollRef={gridRef as React.RefObject<HTMLDivElement>}
           onScroll={syncFrom('grid')}
           width={ui.gridWidth}
+          editedBy={editedBy}
         />
         <div className="splitter" onPointerDown={dragSplit} />
         <Gantt
