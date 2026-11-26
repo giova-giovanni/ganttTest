@@ -1,0 +1,19 @@
+{
+  "_come_si_usa": "Copia questo file come gantt-utenti.json accanto al programma. Senza il file tutti sono amministratori.",
+  "_livelli": "lettura = guarda e stampa · modifica = lavoro normale · admin = anche eliminare, svuotare e sostituire l'archivio",
+  "_pc": "Elenco dei computer che ottengono il livello da soli, senza password: nome del PC, utente, utente@PC oppure indirizzo IP. In Impostazioni > Accesso il programma scrive come ha riconosciuto questo computer: copia quella riga qui dentro.",
+
+  "attivo": true,
+  "predefinito": "modifica",
+
+  "admin": {
+    "password": "cambiami",
+    "pc": ["NOME-DEL-TUO-PC"]
+  },
+
+  "modifica": {
+    "attivo": false,
+    "password": "",
+    "pc": []
+  }
+}

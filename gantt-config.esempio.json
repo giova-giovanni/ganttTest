@@ -1,0 +1,11 @@
+{
+  "_come_si_usa": "Copia questo file come gantt-config.json (senza .esempio) e modifica i valori. Kopie als gantt-config.json speichern und Werte anpassen.",
+  "_dati": "Cartella dove il programma tiene l'archivio. Puo' essere anche una cartella condivisa. Usa le barre normali / oppure il doppio backslash. Predefinito: la cartella 'dati' accanto al programma.",
+  "dati": "dati",
+
+  "_porta": "Porta usata dal programma. Se e' occupata il programma prova la successiva.",
+  "porta": 5180,
+
+  "_modo": "'locale' = raggiungibile solo da questo computer. 'rete' = raggiungibile dagli altri PC della rete tramite browser.",
+  "modo": "locale"
+}

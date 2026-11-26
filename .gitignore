@@ -1,0 +1,30 @@
+# dipendenze e build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# dati salvati dal programma: restano sul PC, non vanno mai nel repository
+dati/
+backups/
+versioni/
+*.bak.json
+gantt-dati*.json
+gantt-blocco.json
+GANTT_*
+
+# configurazione locale (può contenere password o percorsi di rete)
+gantt-config.json
+gantt-utenti.json
+
+# test
+test-results/
+playwright-report/
+tests/screenshots/
+
+# sistema / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.log
