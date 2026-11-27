@@ -125,12 +125,15 @@ export function NoteCard({
   nodes,
   lang,
   showPath = false,
+  pathColor,
   onGoTo,
 }: {
   note: Note;
   nodes: TaskNode[];
   lang: Lang;
   showPath?: boolean;
+  /** colore del progetto, mostrato accanto al percorso */
+  pathColor?: string;
   onGoTo?: (nodeId: string) => void;
 }) {
   const { t } = useT();
@@ -187,6 +190,7 @@ export function NoteCard({
 
       {showPath && path.length > 0 && (
         <button className="note-path" onClick={() => onGoTo?.(note.nodeId)} title={path.join(' › ')}>
+          {pathColor && <span className="dot" style={{ background: pathColor }} />}
           {path.join(' › ')}
         </button>
       )}

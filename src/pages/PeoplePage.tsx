@@ -5,6 +5,8 @@ import { computeAll } from '../utils/tree';
 import { buildAbsenceMap, computeLoad, capacityOf, isAbsent, loadColor, loadPercent } from '../utils/load';
 import { addDays, isWeekend, startOfWeek, todayISO } from '../utils/dates';
 import { AbsenceDialog } from '../components/AbsenceDialog';
+import { PersonProfile } from '../components/PersonProfile';
+import { ColorPicker } from '../components/ColorPicker';
 import type { Person } from '../types';
 
 const PALETTE = ['#2f7de1', '#8e5bd8', '#2aa76b', '#e0873c', '#d6453d', '#0f9bb4', '#c0398f', '#6a7d8c'];
@@ -28,6 +30,7 @@ export function PeoplePage() {
   const [newName, setNewName] = React.useState('');
   const [newRole, setNewRole] = React.useState('');
   const [absOpen, setAbsOpen] = React.useState<string | null>(null);
+  const [profile, setProfile] = React.useState<string | null>(null);
   const [fRole, setFRole] = React.useState('');
   const [sort, setSort] = React.useState<SortKey>('name');
 
@@ -178,128 +181,113 @@ export function PeoplePage() {
         {data.people.length > 0 && shown.length === 0 && <div className="hint">{t('people.noneWithRole')}</div>}
 
         {shown.length > 0 && (
-          <table className="data">
-            <thead>
-              <tr>
-                <th style={{ width: 40 }} />
-                <th>{t('people.name')}</th>
-                <th>{t('people.role')}</th>
-                <th style={{ width: 90 }}>{t('people.hoursPerDay')}</th>
-                <th style={{ width: 70 }}>{t('people.color')}</th>
-                <th className="num">{t('people.tasks')}</th>
-                <th className="num">{t('people.hours')}</th>
-                <th style={{ width: 190 }}>{t('load.avg')} (4 {t('load.week')}.)</th>
-                <th style={{ width: 120 }}>{t('absence.open')}</th>
-                <th style={{ width: 60 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((p) => {
-                const s = stats(p.id);
-                return (
-                  <tr key={p.id}>
-                    <td>
-                      <Avatar person={p} />
-                    </td>
-                    <td>
-                      <input
-                        value={p.name}
-                        readOnly={!canEdit}
-                        onChange={(e) => updatePerson(p.id, { name: e.target.value })}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        value={p.role}
-                        list="gantt-roles"
-                        readOnly={!canEdit}
-                        placeholder={t('people.role')}
-                        onChange={(e) => updatePerson(p.id, { role: e.target.value })}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        type="number"
-                        min={1}
-                        max={24}
-                        step={0.5}
-                        disabled={!canEdit}
-                        value={p.hoursPerDay}
-                        onChange={(e) => updatePerson(p.id, { hoursPerDay: Number(e.target.value) || 8 })}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        type="color"
-                        value={p.color}
-                        disabled={!canEdit}
-                        onChange={(e) => updatePerson(p.id, { color: e.target.value })}
-                      />
-                    </td>
-                    <td className="num">{taskCount(p.id)}</td>
-                    <td className="num">{fmtHours(totals[p.id] ?? 0)} h</td>
-                    <td>
-                      <div
-                        style={{
-                          position: 'relative',
-                          height: 16,
-                          background: 'var(--panel-2)',
-                          border: '1px solid var(--border)',
-                          borderRadius: 4,
-                          overflow: 'hidden',
-                        }}
-                        title={`${Math.round(s.avg)}% · ${s.over} ${t('load.overloadDays')}`}
-                      >
-                        <div
-                          style={{
-                            position: 'absolute',
-                            inset: 0,
-                            width: `${Math.min(100, s.avg / 2)}%`,
-                            background: loadColor(s.avg),
-                          }}
-                        />
-                        <div
-                          style={{
-                            position: 'absolute',
-                            left: '50%',
-                            top: 0,
-                            bottom: 0,
-                            borderLeft: '1px dashed var(--border-strong)',
-                          }}
-                        />
-                        <span
-                          style={{
-                            position: 'relative',
-                            fontSize: 11,
-                            paddingLeft: 6,
-                            lineHeight: '16px',
-                            fontWeight: 600,
-                          }}
+          <div className="table-scroll">
+            <table className="data people-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 52 }} />
+                  <th style={{ width: '17%', minWidth: 160 }}>{t('people.name')}</th>
+                  <th style={{ width: '22%', minWidth: 190 }}>{t('people.role')}</th>
+                  <th style={{ width: 90 }}>{t('people.hoursPerDay')}</th>
+                  <th style={{ width: 60 }}>{t('people.color')}</th>
+                  <th className="num">{t('people.tasks')}</th>
+                  <th className="num">{t('people.hours')}</th>
+                  <th style={{ width: 170 }}>{t('load.avg')} (4 {t('load.week')})</th>
+                  <th />
+                  <th style={{ width: 48 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((p) => {
+                  const s = stats(p.id);
+                  return (
+                    <tr key={p.id}>
+                      <td>
+                        <button
+                          type="button"
+                          className="avatar-btn"
+                          title={t('profile.openFor', { name: p.name })}
+                          aria-label={t('profile.openFor', { name: p.name })}
+                          onClick={() => setProfile(p.id)}
                         >
-                          {Math.round(s.avg)} %
-                        </span>
-                      </div>
-                    </td>
-                    <td>
-                      <button className="btn sm" onClick={() => setAbsOpen(p.id)} title={t('absence.title')}>
-                        {t('btn.open')}
-                      </button>
-                    </td>
-                    <td>
-                      <button
-                        className="btn sm danger"
-                        disabled={!canAdmin}
-                        title={isAdmin ? t('people.deleteConfirm') : t('auth.needAdmin')}
-                        onClick={() => window.confirm(t('people.deleteConfirm')) && deletePerson(p.id)}
-                      >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                          <Avatar person={p} size={32} />
+                        </button>
+                      </td>
+                      <td>
+                        <input
+                          value={p.name}
+                          readOnly={!canEdit}
+                          onChange={(e) => updatePerson(p.id, { name: e.target.value })}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          value={p.role}
+                          list="gantt-roles"
+                          readOnly={!canEdit}
+                          placeholder={t('people.role')}
+                          onChange={(e) => updatePerson(p.id, { role: e.target.value })}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min={1}
+                          max={24}
+                          step={0.5}
+                          disabled={!canEdit}
+                          value={p.hoursPerDay}
+                          onChange={(e) => updatePerson(p.id, { hoursPerDay: Number(e.target.value) || 8 })}
+                        />
+                      </td>
+                      <td>
+                        <ColorPicker
+                          title={t('people.colorOf', { name: p.name })}
+                          value={p.color}
+                          disabled={!canEdit}
+                          onChange={(color) => updatePerson(p.id, { color })}
+                        />
+                      </td>
+                      <td className="num">{taskCount(p.id)}</td>
+                      <td className="num">{fmtHours(totals[p.id] ?? 0)} h</td>
+                      <td>
+                        {/* il numero sta fuori dalla barra: sopra il riempimento chiaro non si leggeva */}
+                        <div className="loadbar" title={`${Math.round(s.avg)}% · ${s.over} ${t('load.overloadDays')}`}>
+                          <div className="loadbar-track">
+                            <div
+                              className="loadbar-fill"
+                              style={{ width: `${Math.min(100, s.avg / 2)}%`, background: loadColor(s.avg) }}
+                            />
+                            {/* la linea a metà è il 100 % */}
+                            <div className="loadbar-mark" />
+                          </div>
+                          <span>{Math.round(s.avg)} %</span>
+                        </div>
+                      </td>
+                      <td className="row-actions">
+                        <button className="btn sm" onClick={() => setProfile(p.id)}>
+                          {t('profile.title')}
+                        </button>
+                        <button className="btn sm" onClick={() => setAbsOpen(p.id)} title={t('absence.title')}>
+                          {t('absence.open')}
+                        </button>
+                      </td>
+                      <td>
+                        <button
+                          className="btn sm danger"
+                          disabled={!canAdmin}
+                          title={isAdmin ? t('people.deleteConfirm') : t('auth.needAdmin')}
+                          onClick={() => window.confirm(t('people.deleteConfirm')) && deletePerson(p.id)}
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
@@ -310,6 +298,17 @@ export function PeoplePage() {
         </button>
       </div>
 
+      {profile && (
+        <PersonProfile
+          key={profile}
+          personId={profile}
+          onClose={() => setProfile(null)}
+          onAbsences={(id) => {
+            setProfile(null);
+            setAbsOpen(id);
+          }}
+        />
+      )}
       {absOpen !== null && <AbsenceDialog onClose={() => setAbsOpen(null)} personId={absOpen || null} />}
     </div>
   );

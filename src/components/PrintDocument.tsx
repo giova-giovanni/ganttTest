@@ -2,6 +2,7 @@ import React from 'react';
 import type { AppData, ComputedMap, Lang, TaskNode } from '../types';
 import { translate, type TKey } from '../i18n';
 import { computeAll, flatten, roots, STATUS_COLORS } from '../utils/tree';
+import { textOn } from '../theme';
 import { plainText } from '../utils/notes';
 import {
   addDays,
@@ -425,7 +426,13 @@ export function PrintDocument({
                       <td className="num">{c?.workDays || '—'}</td>
                       <td className="num">{Math.round((c?.progress ?? 0) * 100)}</td>
                       <td>
-                        <span className="pchip" style={{ background: STATUS_COLORS[c?.status ?? 'TODO'] }}>
+                        <span
+                          className="pchip"
+                          style={{
+                            background: STATUS_COLORS[c?.status ?? 'TODO'],
+                            color: textOn(STATUS_COLORS[c?.status ?? 'TODO']),
+                          }}
+                        >
                           {t(`status.${c?.status ?? 'TODO'}` as TKey)}
                         </span>
                       </td>
@@ -511,7 +518,13 @@ export function PrintDocument({
                 <tr key={r.node.id} className={r.computed.depth === 0 ? 'lvl0' : r.computed.depth === 1 ? 'lvl1' : ''}>
                   <td style={{ paddingLeft: 4 + r.computed.depth * 12 }}>{r.node.name}</td>
                   <td>
-                    <span className="pchip" style={{ background: STATUS_COLORS[r.computed.status] }}>
+                    <span
+                      className="pchip"
+                      style={{
+                        background: STATUS_COLORS[r.computed.status],
+                        color: textOn(STATUS_COLORS[r.computed.status]),
+                      }}
+                    >
                       {t(`status.${r.computed.status}` as TKey)}
                     </span>
                   </td>

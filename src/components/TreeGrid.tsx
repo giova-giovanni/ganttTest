@@ -6,7 +6,8 @@ import { STATUS_COLORS } from '../utils/tree';
 import { formatDate, parseUserDate } from '../utils/dates';
 import { translate, type TKey } from '../i18n';
 import { Avatar, fmtHours } from '../ui';
-import { reportPresence, setColWidth } from '../store';
+import { pageZoom, reportPresence, setColWidth } from '../store';
+import { textOn } from '../theme';
 import type { Presence } from '../utils/api';
 
 interface Col {
@@ -19,7 +20,7 @@ interface Col {
 
 export const COLS: Col[] = [
   { key: 'name', label: 'col.name', width: 270, min: 120 },
-  { key: 'status', label: 'col.status', width: 104, min: 70 },
+  { key: 'status', label: 'col.status', width: 120, min: 70 },
   { key: 'start', label: 'col.start', width: 88, min: 64 },
   { key: 'end', label: 'col.end', width: 88, min: 64 },
   { key: 'hours', label: 'col.hours', width: 70, align: 'right', min: 52 },
@@ -60,6 +61,8 @@ interface Props {
   width: number;
   /** righe che altri utenti stanno modificando in questo momento */
   editedBy?: Record<string, Presence>;
+  /** colore di ogni progetto: striscia a sinistra della sua riga */
+  projectColors?: Record<string, string>;
 }
 
 export function TreeGrid({
@@ -82,6 +85,7 @@ export function TreeGrid({
   onScroll,
   width,
   editedBy = {},
+  projectColors = {},
 }: Props) {
   const [col, setCol] = React.useState<ColKey>('name');
   const [editing, setEditing] = React.useState<{ id: string; col: ColKey } | null>(null);
@@ -112,7 +116,8 @@ export function TreeGrid({
     e.stopPropagation();
     const startX = e.clientX;
     const startW = widthOf(c);
-    const move = (ev: PointerEvent) => setColWidth(c.key, Math.max(c.min, startW + ev.clientX - startX));
+    const zoom = pageZoom();
+    const move = (ev: PointerEvent) => setColWidth(c.key, Math.max(c.min, startW + (ev.clientX - startX) / zoom));
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -353,7 +358,10 @@ export function TreeGrid({
       case 'status':
         if (derived)
           return (
-            <span className="chip" style={{ background: STATUS_COLORS[cp.status], opacity: 0.75 }}>
+            <span
+              className="chip"
+              style={{ background: STATUS_COLORS[cp.status], color: textOn(STATUS_COLORS[cp.status]) }}
+            >
               {translate(lang, `status.${cp.status}` as TKey)}
             </span>
           );
@@ -481,6 +489,11 @@ export function TreeGrid({
                         (sel && col === c.key ? 'sel' : '')
                       }
                       title={derived ? translate(lang, 'project.derived') : undefined}
+                      style={
+                        c.key === 'name' && cp.depth === 0 && !other && projectColors[row.node.id]
+                          ? { boxShadow: `inset 4px 0 0 ${projectColors[row.node.id]}` }
+                          : undefined
+                      }
                       onMouseDown={() => setCol(c.key)}
                       onDoubleClick={() => startEdit(row, c.key)}
                     >

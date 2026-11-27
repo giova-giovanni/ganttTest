@@ -1,10 +1,11 @@
 import { useSyncExternalStore } from 'react';
-import type { Absence, AppData, ColKey, HomeLayout, Note, Person, Status, TaskNode, UiState } from './types';
+import type { Absence, AppData, ColKey, HomeLayout, Note, Page, Person, Status, TaskNode, UiState } from './types';
 import { STATUSES, ABSENCE_TYPES } from './types';
 import type { TKey } from './i18n';
 import { demoData } from './demo';
 import { descendantIds, sanitizeNodes } from './utils/tree';
 import { parseTags, sanitizeHtml } from './utils/notes';
+import { emptyColors, isHex, sanitizeColors } from './theme';
 import {
   api,
   ApiError,
@@ -20,7 +21,7 @@ import {
   type ServerStatus,
   type Session,
 } from './utils/api';
-import { KINDS, applyOps, diffOps, keyOf, same, type Op, type RecordKind } from '../shared/ops.mjs';
+import { KINDS, applyOps, diffOps, isPhotoUrl, keyOf, same, type Op, type RecordKind } from '../shared/ops.mjs';
 import {
   GitHubError,
   cleanPath,
@@ -79,8 +80,13 @@ function normPerson(p: Raw): Person {
     id: str(p.id) || uid('p'),
     name: str(p.name),
     role: str(p.role),
-    color: /^#[0-9a-fA-F]{6}$/.test(str(p.color)) ? str(p.color) : '#2f7de1',
+    color: isHex(p.color) ? p.color : '#2f7de1',
     hoursPerDay: h && h > 0 && h <= 24 ? h : 8,
+    // solo indirizzi web veri: un file o un altro utente non possono far caricare altro
+    photo: isPhotoUrl(str(p.photo).trim()) ? str(p.photo).trim() : '',
+    email: str(p.email).slice(0, 200),
+    phone: str(p.phone).slice(0, 60),
+    about: str(p.about).slice(0, 2000),
   };
 }
 
@@ -97,6 +103,7 @@ function normNode(n: Raw): TaskNode {
     notes: str(n.notes),
     collapsed: !!n.collapsed,
     archived: !!n.archived,
+    color: isHex(n.color) ? n.color : null,
   };
 }
 
@@ -270,7 +277,7 @@ interface State {
 
 export const LEVEL_ORDER: Record<Level, number> = { lettura: 0, modifica: 1, admin: 2 };
 
-const defaultHome: HomeLayout = {
+export const defaultHome: HomeLayout = {
   showKpi: true,
   showCalendar: true,
   showDeadlines: true,
@@ -284,10 +291,24 @@ const defaultHome: HomeLayout = {
   deadlineDays: 30,
 };
 
+export const PAGES: Page[] = ['home', 'project', 'load', 'people', 'notes'];
+
+/** limiti dei cursori di ingrandimento: gli stessi usati per ripulire le preferenze salvate */
+export const ZOOM_LIMITS = { page: [0.8, 2] as const, menu: [0.9, 1.5] as const };
+export const CHART_LIMITS = { rowHeight: [24, 52] as const, dayWidth: [0.5, 3] as const };
+
+export const defaultChart = { rowHeight: 28, dayWidth: 1 };
+
+export const defaultZoom = (): Record<Page, number> => ({ home: 1, project: 1, load: 1, people: 1, notes: 1 });
+
 const defaultUi: UiState = {
   lang: 'it',
   theme: 'light',
   page: 'home',
+  colors: emptyColors(),
+  zoom: defaultZoom(),
+  menuZoom: 1,
+  chart: defaultChart,
   selectedProjectId: null,
   scale: 'week',
   gridWidth: 620,
@@ -300,18 +321,26 @@ const clamp = (v: unknown, min: number, max: number, fallback: number) =>
   Number.isFinite(v as number) ? Math.min(max, Math.max(min, v as number)) : fallback;
 
 /** ripulisce le preferenze salvate: un valore fuori elenco tornerebbe una pagina bianca */
-function sanitizeUi(raw: Partial<UiState>): UiState {
+export function sanitizeUi(raw: Partial<UiState>): UiState {
   const ui = { ...defaultUi, ...raw };
-  const pages: UiState['page'][] = ['home', 'project', 'load', 'people', 'notes'];
   const home = { ...defaultHome, ...(raw.home ?? {}) };
   const colWidths: Partial<Record<ColKey, number>> = {};
   for (const [key, value] of Object.entries(raw.colWidths ?? {})) {
     if (Number.isFinite(value)) colWidths[key as ColKey] = clamp(value, 44, 800, 100);
   }
+  const zoom = defaultZoom();
+  for (const page of PAGES) zoom[page] = clamp(raw.zoom?.[page], ...ZOOM_LIMITS.page, 1);
   return {
     lang: ui.lang === 'de' ? 'de' : 'it',
     theme: ui.theme === 'dark' ? 'dark' : 'light',
-    page: pages.includes(ui.page) ? ui.page : 'home',
+    page: PAGES.includes(ui.page) ? ui.page : 'home',
+    colors: sanitizeColors(raw.colors),
+    zoom,
+    menuZoom: clamp(raw.menuZoom, ...ZOOM_LIMITS.menu, 1),
+    chart: {
+      rowHeight: Math.round(clamp(raw.chart?.rowHeight, ...CHART_LIMITS.rowHeight, defaultChart.rowHeight)),
+      dayWidth: clamp(raw.chart?.dayWidth, ...CHART_LIMITS.dayWidth, defaultChart.dayWidth),
+    },
     selectedProjectId: typeof ui.selectedProjectId === 'string' ? ui.selectedProjectId : null,
     scale: ui.scale === 'day' || ui.scale === 'month' ? ui.scale : 'week',
     gridWidth: clamp(ui.gridWidth, 220, 1100, defaultUi.gridWidth),
@@ -629,6 +658,11 @@ export function setUi(patch: Partial<UiState>) {
 
 export function setHome(patch: Partial<HomeLayout>) {
   setUi({ home: { ...state.ui.home, ...patch } });
+}
+
+/** ingrandimento della pagina che si sta guardando: serve a chi trasforma i pixel del mouse */
+export function pageZoom(): number {
+  return state.ui.zoom[state.ui.page];
 }
 
 export function setColWidth(key: ColKey, width: number) {
@@ -1616,6 +1650,7 @@ export function newNode(parentId: string | null, name: string): TaskNode {
     notes: '',
     collapsed: false,
     archived: false,
+    color: null,
   };
 }
 
@@ -1876,7 +1911,7 @@ export function deleteAbsence(id: string) {
 // ---------------------------------------------------------------- persone
 
 export function addPerson(p: Omit<Person, 'id'>): string {
-  const person: Person = { ...p, id: uid('p') };
+  const person: Person = { photo: '', email: '', phone: '', about: '', ...p, id: uid('p') };
   mutate((d) => {
     d.people = [...d.people, person];
   });

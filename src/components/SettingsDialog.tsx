@@ -4,14 +4,14 @@ import { Modal, useT } from '../ui';
 import { formatDateTime } from '../utils/notes';
 import type { TKey } from '../i18n';
 import { GitHubDialog } from './GitHubDialog';
+import { ColorSettings } from './ColorSettings';
 
-/** Impostazioni personali e informazioni sull'archivio (dove sono i dati, chi li sta usando). */
+/** Impostazioni personali (compresi i colori) e informazioni sull'archivio. */
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
-  const { ui, sync, auth } = useStore();
+  const { sync } = useStore();
   const { t } = useT();
-  const info = sync.info;
+  const [tab, setTab] = React.useState<'general' | 'colors'>('general');
   const shared = sync.mode === 'shared';
-  const github = sync.mode === 'github' ? sync.github : null;
   const [showGh, setShowGh] = React.useState(false);
 
   // una finestra alla volta: le impostazioni lasciano il posto a quella di GitHub
@@ -21,7 +21,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     <Modal
       title={t('settings.title')}
       onClose={onClose}
-      maxWidth={560}
+      maxWidth={620}
       footer={
         <>
           {shared && (
@@ -41,6 +41,29 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     >
+      <div className="tabs">
+        {(['general', 'colors'] as const).map((key) => (
+          <button key={key} type="button" className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>
+            {t(key === 'general' ? 'settings.tabGeneral' : 'settings.tabColors')}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'colors' ? <ColorSettings /> : <GeneralSettings onGitHub={() => setShowGh(true)} />}
+    </Modal>
+  );
+}
+
+/** nome personale, dove sono i dati (anche su GitHub) e livello di accesso */
+function GeneralSettings({ onGitHub }: { onGitHub: () => void }) {
+  const { ui, sync, auth } = useStore();
+  const { t } = useT();
+  const info = sync.info;
+  const shared = sync.mode === 'shared';
+  const github = sync.mode === 'github' ? sync.github : null;
+
+  return (
+    <>
       <div className="field">
         <label>{t('sync.user')}</label>
         {shared ? (
@@ -117,7 +140,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             <p className="hint">{t('gh.localHint')}</p>
           )}
           <div className="row" style={{ justifyContent: 'flex-start', marginTop: 8 }}>
-            <button className="btn" onClick={() => setShowGh(true)}>
+            <button className="btn" onClick={onGitHub}>
               {github ? t('gh.manage') : t('gh.connect')}
             </button>
           </div>
@@ -142,6 +165,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           )}
         </tbody>
       </table>
-    </Modal>
+    </>
   );
 }

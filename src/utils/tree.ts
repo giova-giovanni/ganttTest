@@ -222,9 +222,10 @@ export function sanitizeNodes(nodes: TaskNode[]): TaskNode[] {
   return out;
 }
 
+/** variabili CSS: i valori stanno in styles.css e si possono cambiare dalle impostazioni */
 export const STATUS_COLORS: Record<Status, string> = {
-  TODO: '#8b95a6',
-  IN_PROGRESS: '#2f7de1',
-  DONE: '#2aa76b',
-  CANCELLED: '#c0392b',
+  TODO: 'var(--st-todo)',
+  IN_PROGRESS: 'var(--st-progress)',
+  DONE: 'var(--st-done)',
+  CANCELLED: 'var(--st-cancelled)',
 };

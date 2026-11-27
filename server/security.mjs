@@ -13,7 +13,9 @@ export const CSP = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'", // stili in linea di React e della stampa
-  "img-src 'self' data: blob:",
+  // le foto dei profili sono indirizzi web scelti dagli utenti (solo immagini, non script);
+  // con «Referrer-Policy: no-referrer» il sito della foto non viene a sapere l'indirizzo di Gantt Planner
+  "img-src 'self' data: blob: https: http:",
   "font-src 'self' data:",
   "connect-src 'self'",
   "object-src 'none'",

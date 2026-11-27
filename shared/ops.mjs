@@ -14,8 +14,8 @@ export const KINDS = { node: 'nodes', person: 'people', absence: 'absences', not
 
 /** campi condivisi; quelli non elencati restano nel browser (es. «collapsed»: rami aperti/chiusi) */
 export const FIELDS = {
-  node: ['parentId', 'name', 'status', 'start', 'end', 'hours', 'assigneeId', 'notes', 'archived'],
-  person: ['name', 'role', 'color', 'hoursPerDay'],
+  node: ['parentId', 'name', 'status', 'start', 'end', 'hours', 'assigneeId', 'notes', 'archived', 'color'],
+  person: ['name', 'role', 'color', 'hoursPerDay', 'photo', 'email', 'phone', 'about'],
   absence: ['personId', 'start', 'end', 'type', 'note'],
   note: ['nodeId', 'title', 'body', 'tags', 'author', 'createdAt', 'updatedAt', 'pinned'],
 };
@@ -206,6 +206,12 @@ const day = (v) => typeof v === 'string' && ISO_DAY.test(v);
 const time = (v) => typeof v === 'string' && v.length <= 40 && !Number.isNaN(Date.parse(v));
 const num = (min, max) => (v) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 const bool = (v) => typeof v === 'boolean';
+/** campi aggiunti dopo: una scheda rimasta aperta con la versione precedente non li manda */
+const optional = (check) => (v) => v === undefined || v === null || check(v);
+const hexColor = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
+
+/** una foto di profilo è un indirizzo web (http o https) senza spazi: niente «javascript:» o «data:» */
+export const isPhotoUrl = (v) => typeof v === 'string' && v.length <= 2000 && /^https?:\/\/[^\s"'<>\\]+$/i.test(v);
 
 const RULES = {
   node: {
@@ -218,12 +224,17 @@ const RULES = {
     assigneeId: orNull(isId),
     notes: text(5000),
     archived: bool,
+    color: optional(hexColor),
   },
   person: {
     name: text(200),
     role: text(200),
-    color: (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v),
+    color: hexColor,
     hoursPerDay: num(0.1, 24),
+    photo: optional((v) => v === '' || isPhotoUrl(v)),
+    email: optional(text(200)),
+    phone: optional(text(60)),
+    about: optional(text(2000)),
   },
   absence: {
     personId: isId,

@@ -9,6 +9,7 @@ import { byId, rootIdOf } from '../utils/tree';
 import { addDays, formatDate, todayISO } from '../utils/dates';
 import { exportNotesList } from '../utils/io';
 import { pageRule, usePrintWhenReady } from '../utils/print';
+import { projectColors } from '../utils/projectColors';
 import type { Note } from '../types';
 
 type SortKey = 'new' | 'old' | 'updated' | 'project';
@@ -39,6 +40,7 @@ export function NotesPage() {
   const nodes = data.nodes;
   const nodeMap = React.useMemo(() => byId(nodes), [nodes]);
   const roots = nodes.filter((n) => n.parentId === null);
+  const colorOf = React.useMemo(() => projectColors(nodes), [nodes]);
   const rootNameOf = React.useCallback(
     (nodeId: string) => nodeMap[rootIdOf(nodes, nodeId)]?.name ?? '',
     [nodeMap, nodes],
@@ -221,7 +223,15 @@ export function NotesPage() {
 
       <div className="notes-list">
         {filtered.map((n) => (
-          <NoteCard key={n.id} note={n} nodes={nodes} lang={lang} showPath onGoTo={goTo} />
+          <NoteCard
+            key={n.id}
+            note={n}
+            nodes={nodes}
+            lang={lang}
+            showPath
+            pathColor={colorOf[rootIdOf(nodes, n.nodeId)]}
+            onGoTo={goTo}
+          />
         ))}
       </div>
 

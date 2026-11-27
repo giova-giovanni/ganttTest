@@ -22,3 +22,4 @@ export function applyOps(
 ): string[];
 export function diffOps(before: AppData, after: AppData): Op[];
 export function invalidOps(ops: unknown): string | null;
+export function isPhotoUrl(v: unknown): boolean;

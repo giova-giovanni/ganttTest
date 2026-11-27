@@ -5,6 +5,7 @@ import { formatDateTime, plainText } from './notes';
 import { formatDate, isoWeek, startOfWeek, addDays, diffDays, weekdayName, countWorkingDays } from './dates';
 import { buildAbsenceMap, capacityOf, computeLoad, loadPercent, UNASSIGNED } from './load';
 import { migrate, uid } from '../store';
+import { isPhotoUrl } from '../../shared/ops.mjs';
 import {
   csvBlob,
   formatNumber,
@@ -137,6 +138,9 @@ export function buildPeopleCsv(data: AppData, lang: Lang): string {
       translate(lang, 'people.tasks'),
       `${translate(lang, 'people.hours')} (h)`,
       translate(lang, 'people.color'),
+      translate(lang, 'profile.email'),
+      translate(lang, 'profile.phone'),
+      translate(lang, 'profile.photoColumn'),
     ],
   ];
   for (const p of data.people) {
@@ -146,7 +150,17 @@ export function buildPeopleCsv(data: AppData, lang: Lang): string {
       if (!c || c.hasChildren || n.assigneeId !== p.id || c.status === 'CANCELLED' || archived.has(c.rootId)) continue;
       tasks += 1;
     }
-    rows.push([p.name, p.role, formatNumber(capacityOf(p)), String(tasks), formatNumber(totals[p.id] ?? 0), p.color]);
+    rows.push([
+      p.name,
+      p.role,
+      formatNumber(capacityOf(p)),
+      String(tasks),
+      formatNumber(totals[p.id] ?? 0),
+      p.color,
+      p.email ?? '',
+      p.phone ?? '',
+      p.photo ?? '',
+    ]);
   }
   return toCsv(rows);
 }
@@ -412,6 +426,9 @@ const FIELD_SYNONYMS: Record<string, string[]> = {
   role: ['ruolo', 'rolle', 'role', 'funzione', 'funktion'],
   capacity: ['oregiorno', 'oreal giorno', 'stdtag', 'stundentag', 'kapazitat', 'capacita', 'capacity', 'hoursperday'],
   color: ['colore', 'farbe', 'color'],
+  email: ['email', 'mail', 'indirizzoemail', 'emailadresse'],
+  phone: ['telefono', 'telefon', 'phone', 'cellulare', 'handy'],
+  photo: ['foto', 'photo', 'bild', 'immagine', 'avatar'],
   absenceType: ['motivo', 'grund', 'tipo', 'typ', 'type', 'reason'],
 };
 
@@ -459,7 +476,8 @@ function parseAbsenceType(raw: string): AbsenceType {
 
 function detectKind(index: Record<string, number>): ImportKind {
   const has = (f: string) => index[f] !== undefined;
-  if (has('name') && (has('role') || has('capacity')) && !has('start') && !has('level')) return 'people';
+  if (has('name') && (has('role') || has('capacity') || has('email') || has('photo')) && !has('start') && !has('level'))
+    return 'people';
   if (has('assignee') && has('start') && has('end') && has('absenceType') && !has('name')) return 'absences';
   return 'tasks';
 }
@@ -543,12 +561,17 @@ export function analyzeImport(text: string, filename: string, existing: AppData,
       if (!name) continue;
       const cap = index.capacity !== undefined ? parseNumber(r[index.capacity]) : null;
       const color = index.color !== undefined ? (r[index.color] ?? '').trim() : '';
+      const cell = (field: string) => (index[field] !== undefined ? (r[index[field]] ?? '').trim() : '');
+      const photo = cell('photo');
       data.people.push({
         id: uid('p'),
         name,
-        role: index.role !== undefined ? (r[index.role] ?? '').trim() : '',
+        role: cell('role'),
         color: /^#[0-9a-fA-F]{6}$/.test(color) ? color : pickColor(data.people.length),
         hoursPerDay: cap && cap > 0 && cap <= 24 ? cap : 8,
+        email: cell('email').slice(0, 200),
+        phone: cell('phone').slice(0, 60),
+        photo: isPhotoUrl(photo) ? photo : '',
       });
     }
     if (!data.people.length) return { ...base, kind, columns, errorKey: 'io.errorEmpty' };

@@ -1,7 +1,8 @@
 import React from 'react';
-import { Gantt, DAY_WIDTH, ganttRange, type GanttRow, type Scale } from './Gantt';
+import { Gantt, dayWidth, ganttRange, type GanttRow, type Scale } from './Gantt';
 import { TreeGrid } from './TreeGrid';
 import { NotesPanel } from './Notes';
+import { ColorPicker } from './ColorPicker';
 import { fmtHours, useCanEdit, useOthers, useT } from '../ui';
 import type { Presence } from '../utils/api';
 import {
@@ -10,6 +11,7 @@ import {
   indentNode,
   moveNode,
   outdentNode,
+  pageZoom,
   resetColWidths,
   setArchived,
   setCollapsedAll,
@@ -23,9 +25,8 @@ import type { Status, TaskNode } from '../types';
 import { STATUSES } from '../types';
 import { ancestorIds, computeAll, flatten, pathOf } from '../utils/tree';
 import { diffDays, todayISO } from '../utils/dates';
+import { projectColors } from '../utils/projectColors';
 import { translate, type TKey } from '../i18n';
-
-export const ROW_H = 28;
 
 export interface BoardFocus {
   id: string;
@@ -58,6 +59,8 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
   const [fStatus, setFStatus] = React.useState<'' | Status>('');
   const [fPerson, setFPerson] = React.useState('');
   const [notesFor, setNotesFor] = React.useState<string | null>(null);
+  const { rowHeight, dayWidth: dayFactor } = ui.chart;
+  const colorOf = React.useMemo(() => projectColors(data.nodes), [data.nodes]);
   const gridRef = React.useRef<HTMLDivElement | null>(null);
   const ganttRef = React.useRef<HTMLDivElement | null>(null);
   const lock = React.useRef(false);
@@ -159,11 +162,11 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
     const el = ganttRef.current;
     if (!el) return;
     const { start } = ganttRange(ganttRows, ui.scale);
-    const x = diffDays(start, todayISO()) * DAY_WIDTH[ui.scale];
+    const x = diffDays(start, todayISO()) * dayWidth(ui.scale, dayFactor);
     el.scrollTo({ left: Math.max(0, x - el.clientWidth / 3), behavior: 'smooth' });
     // ganttRows cambia a ogni modifica: la funzione serve solo al click e all'apertura
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ui.scale]);
+  }, [ui.scale, dayFactor]);
 
   React.useEffect(() => {
     const id = window.setTimeout(scrollToToday, 60);
@@ -185,11 +188,11 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
     const timer = window.setTimeout(() => {
       const idx = rowsRef.current.findIndex((r) => r.node.id === id);
       if (idx < 0) return;
-      gridRef.current?.scrollTo({ top: Math.max(0, idx * ROW_H - 60), behavior: 'smooth' });
+      gridRef.current?.scrollTo({ top: Math.max(0, idx * rowHeight - 60), behavior: 'smooth' });
       const start = computed[id]?.start;
       if (start && ganttRef.current) {
         const range = ganttRange(ganttRows, ui.scale);
-        const x = diffDays(range.start, start) * DAY_WIDTH[ui.scale];
+        const x = diffDays(range.start, start) * dayWidth(ui.scale, dayFactor);
         ganttRef.current.scrollTo({ left: Math.max(0, x - ganttRef.current.clientWidth / 3), behavior: 'smooth' });
       }
     }, 90);
@@ -202,9 +205,11 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
   const dragSplit = (e: React.PointerEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const startW = ui.gridWidth;
+    // la larghezza vera: su uno schermo stretto può essere minore di quella salvata
+    const startW = gridRef.current?.offsetWidth || ui.gridWidth;
+    const zoom = pageZoom();
     const move = (ev: PointerEvent) => {
-      const w = Math.min(1100, Math.max(220, startW + ev.clientX - startX));
+      const w = Math.min(1100, Math.max(220, startW + (ev.clientX - startX) / zoom));
       setUi({ gridWidth: w });
     };
     const up = () => {
@@ -348,6 +353,17 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
           {t('col.resetWidth')}
         </button>
         {showArchive && root && (
+          <ColorPicker
+            title={t('project.colorOf', { name: root.name })}
+            label={t('project.color')}
+            value={colorOf[root.id]}
+            isCustom={!!root.color}
+            disabled={!canEdit}
+            onChange={(color) => updateNode(root.id, { color })}
+            onReset={() => updateNode(root.id, { color: null })}
+          />
+        )}
+        {showArchive && root && (
           <button
             className="btn sm"
             disabled={!canEdit}
@@ -367,13 +383,22 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
         </button>
       </div>
 
-      <div className="split" style={height ? { height, flex: '0 0 auto' } : undefined}>
+      <div
+        className="split"
+        style={
+          {
+            '--row-h': `${rowHeight}px`,
+            ...(height ? { height, flex: '0 0 auto' } : null),
+          } as React.CSSProperties
+        }
+      >
         <TreeGrid
           rows={rows}
           people={data.people}
           notes={data.notes}
           lang={lang}
-          rowHeight={ROW_H}
+          rowHeight={rowHeight}
+          projectColors={colorOf}
           selectedId={selectedId}
           widths={ui.colWidths}
           onSelect={setSelectedId}
@@ -397,7 +422,8 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
           rows={ganttRows}
           scale={ui.scale}
           lang={lang}
-          rowHeight={ROW_H}
+          rowHeight={rowHeight}
+          dayFactor={dayFactor}
           selectedId={selectedId}
           onSelect={setSelectedId}
           onChangeDates={onBarChange}
