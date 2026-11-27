@@ -1100,6 +1100,7 @@ table.heat tr.selected td.person {
   margin-top: 14px;
 }
 .modal input[type='text'],
+.modal input[type='password'],
 .modal input[type='number'],
 .modal select {
   width: 100%;
@@ -2280,4 +2281,49 @@ table.grid th {
 }
 .rt-body a {
   color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- archivio su GitHub */
+a.btn {
+  display: inline-block;
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.gh-intro {
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+.gh-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.gh-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.gh-msg.caution {
+  background: rgba(214, 148, 30, 0.14);
+  border: 1px solid rgba(214, 148, 30, 0.5);
+  color: var(--text);
+}
+.gh-msg.caution b {
+  color: #9a4a12;
+}
+[data-theme='dark'] .gh-msg.caution b {
+  color: #f3b37a;
+}
+.gh-msg.err {
+  background: rgba(214, 69, 61, 0.12);
+  border: 1px solid rgba(214, 69, 61, 0.45);
+  color: #a3312a;
+}
+[data-theme='dark'] .gh-msg.err {
+  color: #f0a29c;
 }

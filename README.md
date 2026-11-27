@@ -6,6 +6,10 @@ carico di lavoro per persona, ferie e assenze, note, stampa e importazione/espor
 Versione **neutra**: nessun marchio e nessun dato reale. I soli dati presenti sono quelli di
 esempio, inventati, in [`src/demo.ts`](src/demo.ts). L'interfaccia è in italiano e in tedesco.
 
+**Online su GitHub Pages, con i dati salvati su GitHub**: nessun server da installare. Il workflow
+[`pages.yml`](.github/workflows/pages.yml) compila e pubblica il sito; i dati stanno in un file JSON di
+un repository (privato) e ogni salvataggio è un commit. Attivazione e uso: [docs/github.md](docs/github.md).
+
 ---
 
 ## Avvio
@@ -31,10 +35,16 @@ npm start
 Su Windows basta un doppio clic su **`avvia.bat`** (installa, compila e avvia).
 **`avvia-rete.bat`** rende il programma raggiungibile anche dagli altri PC della rete locale.
 
-### Senza server
+### Senza server: GitHub Pages
 
-Aperta come sito statico (`npm run preview` o qualsiasi hosting di file) l'app funziona lo
-stesso: i dati restano **nel browser** (localStorage) e al primo avvio compaiono i dati di esempio.
+Aperta come sito statico (GitHub Pages, `npm run preview` o qualsiasi hosting di file) l'app
+funziona lo stesso: i dati restano **nel browser** (localStorage) e al primo avvio compaiono i dati
+di esempio. Con **Salva su GitHub…** i dati passano in un file di un repository GitHub, condiviso da
+chi ha accesso al repository: [docs/github.md](docs/github.md).
+
+Attenzione: GitHub Pages deve pubblicare la build (`dist/`), non i sorgenti. Con *Deploy from a
+branch* la pagina resta ferma su «Apertura dell'archivio…» (`src/main.tsx` → 404): serve
+*Settings → Pages → Source: GitHub Actions*.
 
 ### Prova con più utenti, su dati finti
 
@@ -50,6 +60,7 @@ finestra anonima) ed entrare con i due account.
 | Con il server (`npm start`) | cartella `dati/` accanto al programma: `gantt-dati.json` (riscritto entro un secondo da ogni modifica), `registro/` (ogni modifica: chi, quando, cosa), copia `gantt-dati.bak.json`, `versioni/` (una copia all'ora, ultime 30), `backups/` (backup settimanale fatto dal server, ultimi 20) | **No**, esclusa da `.gitignore` |
 | In sviluppo (`npm run dev`) | `.test-tmp/dati-sviluppo/`, mai la cartella `dati/` (si cambia con `GANTT_DATI`) | No |
 | Senza server | `localStorage` del browser | No |
+| Su GitHub (*Salva su GitHub…*) | file `gantt-dati.json` nel repository scelto (consigliato privato), un commit per salvataggio; copia di lavoro nel `localStorage`; il token resta solo nel browser | Sì, **nel repository dei dati** |
 | Esportazioni (`GANTT_*.json`, `GANTT_*.csv`) | cartella dei download | No, escluse da `.gitignore` |
 
 I dati di esempio si spostano da soli sulla **settimana corrente**: il Gantt di prova mostra
@@ -76,6 +87,8 @@ Per usare un browser già installato invece di scaricare Chromium: variabile d'a
 | `tests/unit/data.test.ts` | coerenza dei dati di esempio e normalizzazione di dati sporchi |
 | `tests/e2e/browser.spec.ts` | modalità solo-browser: nuovo progetto, barre del Gantt, trascinamento e ridimensionamento, annulla/ripristina, persistenza, carico di lavoro, backup JSON, lingua e tema |
 | `tests/e2e/server.spec.ts` | modalità server: due utenti modificano insieme, le modifiche arrivano subito all'altro, chi è connesso, dati riletti dal file |
+| `tests/unit/github.test.ts` | archivio su GitHub: lettura/scrittura con sha ed ETag, errori (token, permessi, limiti, rete), unione a tre vie delle modifiche, messaggi dei commit, testo UTF-8 |
+| `tests/e2e/github.spec.ts` | archivio su GitHub (API simulate): collegamento, due persone sullo stesso file con conflitto risolto, «annulla» solo delle proprie modifiche, senza rete, repository pubblico, token sbagliato |
 | `tests/server-archive.test.mjs` | archivio del server: mai un archivio vuoto al posto di uno rovinato, scrittura sicura, registro e ripresa dopo uno spegnimento brusco, migrazione, cascate, sola lettura se la cartella è già in uso |
 | `tests/server-api.test.mjs`, `tests/server-users.test.mjs` | rotte `/api/*`, sessioni con scadenza, account e hash delle password, blocco dopo troppi tentativi, livelli controllati dal server |
 | `tests/server-security.test.mjs`, `tests/server-static.test.mjs` | intestazioni di sicurezza, nome del server (DNS rebinding), origine delle scritture, proxy, nessuna uscita dalla cartella dell'interfaccia |
@@ -205,8 +218,10 @@ src/
   utils/io.ts        esportazione e importazione con anteprima
   utils/backup.ts    backup settimanale automatico
   utils/api.ts       dialogo con il server
+  utils/github.ts    archivio su GitHub: lettura e scrittura del file con le API REST, token nel browser
+  utils/merge.ts     unione a tre vie delle modifiche (archivio su GitHub) e messaggi dei commit
   utils/fields.ts    nomi e valori dei campi per avvisi e registro
-  components/        Board (tabella + Gantt), TreeGrid, Gantt, dialoghi, stampa, barra di stato, registro
+  components/        Board (tabella + Gantt), TreeGrid, Gantt, dialoghi (anche GitHub), stampa, barra di stato, registro
   pages/             Home, Progetto, Carico, Responsabili, Note
 shared/ops.mjs       operazioni sui dati: lo stesso codice nel browser e nel server
 server.mjs           server HTTP senza dipendenze (interfaccia + archivio)
@@ -220,8 +235,9 @@ server/security.mjs  intestazioni di sicurezza e controllo del nome del server
 server/static.mjs    file dell'interfaccia, senza uscire dalla cartella dist
 server/api.mjs       rotte /api/*
 tools/               prova con dati finti, password, servizio Windows, verifica dell'archivio
-docs/                installazione sul server, scelte tecniche, checklist di rilascio
+docs/                GitHub Pages e dati su GitHub, installazione sul server, scelte tecniche, checklist di rilascio
+.github/workflows/   pages.yml: build e pubblicazione su GitHub Pages
 tests/unit/          test Vitest
 tests/*.test.mjs     test node:test (server, accesso, sicurezza, più utenti, import/export)
-tests/e2e/           test Playwright
+tests/e2e/           test Playwright (fake-github.ts: GitHub simulato in memoria)
 ```

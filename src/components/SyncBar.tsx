@@ -4,6 +4,7 @@ import {
   dismissNotice,
   dismissSyncError,
   restoreValue,
+  syncGitHubNow,
   uploadLocalData,
   useStore,
   type Notice,
@@ -13,20 +14,26 @@ import { formatDateTime } from '../utils/notes';
 import { fieldLabel, fieldValue } from '../utils/fields';
 import type { TKey } from '../i18n';
 import { ChangeLogDialog } from './ChangeLogDialog';
+import { GitHubDialog } from './GitHubDialog';
 
 /**
- * Barra di stato dell'archivio condiviso: chi è collegato, se le modifiche sono salvate,
- * avvisi (valore sostituito da un altro utente, record eliminato) e registro delle modifiche.
+ * Barra di stato dell'archivio: chi è collegato, se le modifiche sono salvate, avvisi (valore
+ * sostituito da un altro utente, record eliminato) e registro delle modifiche. Con l'archivio
+ * su GitHub: repository, salvataggio, «Aggiorna» e la cronologia del file su GitHub.
  */
 export function SyncBar() {
   const { sync, auth, data } = useStore();
   const { t } = useT();
   const others = useOthers();
   const [showLog, setShowLog] = React.useState(false);
+  const [showGh, setShowGh] = React.useState(false);
 
   const shared = sync.mode === 'shared';
+  const github = sync.mode === 'github' ? sync.github : null;
+  const local = !shared && !github;
   const readOnlyServer = sync.server?.readOnly ?? null;
   const mayWrite = auth.level !== 'lettura' && !readOnlyServer;
+  const ghTone = github ? (mayWrite && github.canWrite ? ' write' : ' read') : '';
   const projectName = (id: string | null) => (id ? data.nodes.find((n) => n.id === id)?.name ?? '' : '');
   const whoTitle = others
     .map((p) => (p.project ? t('presence.onProject', { user: p.user, project: projectName(p.project) }) : p.user))
@@ -34,9 +41,17 @@ export function SyncBar() {
 
   return (
     <>
-      <div className={'syncbar' + (shared ? (mayWrite ? ' write' : ' read') : '')}>
+      <div className={'syncbar' + (shared ? (mayWrite ? ' write' : ' read') : ghTone)}>
         <span className="sb-state">
-          {shared ? (sync.online ? t('sync.online') : t('sync.reconnecting')) : t('sync.local')}
+          {shared
+            ? sync.online
+              ? t('sync.online')
+              : t('sync.reconnecting')
+            : github
+              ? sync.online
+                ? t('gh.stateOnline')
+                : t('gh.stateOffline')
+              : t('sync.local')}
         </span>
         {shared && sync.session && (
           <span className="sb-who">
@@ -44,7 +59,19 @@ export function SyncBar() {
             {sync.session.guest ? ` (${t('login.guestBadge')})` : ''} · {t(`auth.level.${auth.level}` as TKey)}
           </span>
         )}
-        {!shared && <span className="sb-who">{t('sync.localHint')}</span>}
+        {local && <span className="sb-who">{t('sync.localHint')}</span>}
+        {local && (
+          <button className="btn sm primary" onClick={() => setShowGh(true)}>
+            {t('gh.connect')}
+          </button>
+        )}
+        {github && (
+          <span className="sb-who" title={`${github.repo}/${github.path}`}>
+            {github.repo}
+            {github.user ? ` · @${github.user}` : ''}
+            {!github.canWrite || !mayWrite ? ` · ${t('gh.readOnly')}` : ''}
+          </span>
+        )}
         {shared && others.length > 0 && (
           <span className="sb-who" title={whoTitle} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             {t('sync.others')}: <PresenceDots people={others} />
@@ -64,6 +91,27 @@ export function SyncBar() {
         {shared && (
           <button className="btn sm" onClick={() => setShowLog(true)}>
             {t('sync.log')}
+          </button>
+        )}
+
+        {github && sync.saving && <span className="sb-info">{t('sync.saving')}</span>}
+        {github && !sync.saving && sync.pending > 0 && <span className="sb-info warn">{t('sync.pending')}</span>}
+        {github && !sync.saving && sync.pending === 0 && (
+          <span className="sb-info">{sync.savedAt ? t('sync.saved', { d: formatDateTime(sync.savedAt) }) : t('sync.allSaved')}</span>
+        )}
+        {github && (
+          <button className="btn sm" onClick={() => void syncGitHubNow()} title={t('gh.syncNowTitle')}>
+            ↻ {t('gh.syncNow')}
+          </button>
+        )}
+        {github && (
+          <a className="btn sm" href={github.historyUrl} target="_blank" rel="noopener noreferrer" title={t('gh.historyTitle')}>
+            {t('gh.history')} ↗
+          </a>
+        )}
+        {github && (
+          <button className="btn sm" onClick={() => setShowGh(true)}>
+            {t('gh.manage')}
           </button>
         )}
       </div>
@@ -103,6 +151,7 @@ export function SyncBar() {
       )}
 
       {showLog && <ChangeLogDialog onClose={() => setShowLog(false)} />}
+      {showGh && <GitHubDialog onClose={() => setShowGh(false)} />}
     </>
   );
 }

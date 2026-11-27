@@ -33,8 +33,36 @@ function localApi(): Plugin {
   };
 }
 
+// Nella build (GitHub Pages o qualsiasi hosting di file) la pagina porta con sé le stesse regole
+// di sicurezza del server, più le API di GitHub per il salvataggio: nessuno script estraneo può
+// partire e leggere il token. Solo nella build: in sviluppo Vite usa script in linea.
+const PAGE_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' https://api.github.com",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+].join('; ');
+
+function pageCsp(): Plugin {
+  return {
+    name: 'gantt-csp',
+    apply: 'build',
+    // subito dopo il charset: la regola vale per tutto ciò che segue
+    transformIndexHtml: (html) =>
+      html.replace(
+        /(<meta charset="UTF-8" \/>)/i,
+        `$1\n    <meta http-equiv="Content-Security-Policy" content="${PAGE_CSP}" />`,
+      ),
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), localApi()],
+  plugins: [react(), localApi(), pageCsp()],
   base: './',
   server: { port: 5180, open: true },
   build: { outDir: 'dist' },
