@@ -1,7 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
-// Test end-to-end nel browser, in due modalità:
+// Test end-to-end nel browser, in tre modalità:
 //  - "browser": l'app servita come sito statico (vite preview), senza server → dati nel localStorage
+//  - "github":  lo stesso sito statico con l'archivio su GitHub (API simulate da tests/e2e/fake-github.ts)
 //  - "server":  il server vero (server.mjs) con l'archivio su file, su una cartella temporanea
 // Prima volta: npx playwright install chromium
 // (oppure PW_CHANNEL=msedge / chrome per usare un browser già installato)
@@ -24,6 +25,8 @@ export default defineConfig({
   },
   projects: [
     { name: 'browser', testMatch: /browser\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${STATIC_PORT}/` } },
+    // archivio su GitHub (come su GitHub Pages), con le API di GitHub simulate nel test
+    { name: 'github', testMatch: /github\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${STATIC_PORT}/` } },
     { name: 'server', testMatch: /server\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${SERVER_PORT}/` } },
   ],
   webServer: [

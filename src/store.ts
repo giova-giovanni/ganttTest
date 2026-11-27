@@ -20,7 +20,24 @@ import {
   type ServerStatus,
   type Session,
 } from './utils/api';
-import { KINDS, applyOps, diffOps, keyOf, type Op, type RecordKind } from '../shared/ops.mjs';
+import { KINDS, applyOps, diffOps, keyOf, same, type Op, type RecordKind } from '../shared/ops.mjs';
+import {
+  GitHubError,
+  cleanPath,
+  clearGitHubConfig,
+  decodeData,
+  encodeData,
+  getRepo,
+  getUser,
+  historyUrl,
+  pagesSite,
+  readFile,
+  readGitHubConfig,
+  saveGitHubConfig,
+  writeFile,
+  type GitHubConfig,
+} from './utils/github';
+import { describeChanges, rebase } from './utils/merge';
 
 const DATA_KEY = 'gantt.data.v1';
 const UI_KEY = 'gantt.ui.v1';
@@ -164,7 +181,25 @@ function cleanRemoteOp(o: Op): Op {
 
 // ---------------------------------------------------------------- stato
 
-export type SyncMode = 'browser' | 'shared';
+/** 'shared' = server Node; 'github' = file in un repository GitHub; 'browser' = solo questo browser */
+export type SyncMode = 'browser' | 'shared' | 'github';
+
+/** collegamento all'archivio su GitHub, per la barra di stato e le impostazioni */
+export interface GitHubStatus {
+  /** proprietario/nome del repository */
+  repo: string;
+  path: string;
+  /** ramo usato (quello principale se non indicato) */
+  branch: string;
+  /** utente GitHub del token ('' finché non risponde GitHub) */
+  user: string;
+  private: boolean | null;
+  canWrite: boolean;
+  historyUrl: string;
+  lastCommitUrl: string | null;
+  /** ultimo controllo riuscito delle modifiche altrui */
+  checkedAt: string | null;
+}
 
 /** avviso da mostrare (con eventuale «Rimetti il mio valore») */
 export interface Notice {
@@ -201,6 +236,8 @@ export interface SyncState {
   notices: Notice[];
   /** dati presenti solo in questo browser (versioni senza server), da trasferire */
   localOnly: AppData | null;
+  /** solo in modalità 'github' */
+  github: GitHubStatus | null;
 }
 
 /**
@@ -340,6 +377,7 @@ let state: State = {
     presence: [],
     notices: [],
     localOnly: null,
+    github: null,
   },
   auth: {
     ready: false,
@@ -388,7 +426,7 @@ function setAuth(patch: Partial<AuthState>) {
 /** true quando le modifiche sono permesse: livello e server lo consentono */
 export function canEditState(s: State): boolean {
   if (s.auth.level === 'lettura') return false;
-  if (s.sync.mode === 'browser') return true;
+  if (s.sync.mode === 'browser' || s.sync.mode === 'github') return true;
   return !!s.sync.session && !s.sync.server?.readOnly;
 }
 
@@ -573,6 +611,10 @@ function mutate(fn: (d: AppData) => AppData | void, history = true, opts: { repl
 function afterChange(before: AppData, after: AppData, replace = false) {
   if (state.sync.mode === 'browser') {
     persistLocal();
+    return;
+  }
+  if (state.sync.mode === 'github') {
+    ghLocalChanged();
     return;
   }
   const ops: Op[] = replace ? [{ op: 'replace', data: sharedData(after) }] : diffOps(before, after);
@@ -970,6 +1012,11 @@ export function flushPersist() {
     persistLocal();
     return;
   }
+  if (state.sync.mode === 'github') {
+    // la copia locale è già aggiornata a ogni modifica: ciò che non è partito parte alla prossima apertura
+    writeGhLocal();
+    return;
+  }
   if (!inflight && queue.length) {
     const ops = queue.flatMap((b) => b.ops);
     if (sendOpsOnUnload({ client: CLIENT_ID, batch: queue[0].id, ops })) queue = [];
@@ -1015,11 +1062,22 @@ export async function initStore(): Promise<void> {
   const ui = readLocalUi();
   state = { ...state, ui };
 
+  // su GitHub Pages non c'è nessun server da cercare
+  const onPages = typeof window !== 'undefined' && !!pagesSite();
   let info: ServerInfo | null = null;
-  try {
-    info = await api.info();
-  } catch {
-    info = null;
+  if (!onPages) {
+    try {
+      info = await api.info();
+    } catch {
+      info = null;
+    }
+  }
+
+  // il server Node, se risponde, ha la precedenza; altrimenti l'archivio su GitHub, se collegato
+  const ghConfig = info ? null : readGitHubConfig();
+  if (ghConfig) {
+    await startGitHub(ghConfig);
+    return;
   }
 
   if (!info) {
@@ -1067,6 +1125,482 @@ export async function initStore(): Promise<void> {
   setSync({ ready: true, needLogin: true });
 }
 
+// ---------------------------------------------------------------- archivio su GitHub
+//
+// I dati stanno in un file JSON di un repository GitHub (vedi utils/github.ts).
+// - Ogni modifica resta subito nel browser (copia locale) e parte verso GitHub dopo qualche
+//   secondo di calma: un commit raccoglie più modifiche ravvicinate.
+// - Si scrive sempre «sopra» la versione letta (sha): se un altro ha salvato nel frattempo,
+//   GitHub rifiuta, si legge la sua versione, si uniscono le modifiche (utils/merge.ts) e si riprova.
+// - Ogni 30 s (e quando si torna sulla scheda) si controlla se altri hanno salvato.
+// - Nulla va perso chiudendo la pagina: la copia locale e la versione di partenza restano nel
+//   browser e le modifiche non ancora partite vengono unite e salvate alla prossima apertura.
+
+const GH_BASE_KEY = 'gantt.github.base.v1';
+const GH_LOCAL_KEY = 'gantt.github.local.v1';
+/** calma dopo l'ultima modifica prima di salvare */
+const GH_DEBOUNCE_MS = 2500;
+/** al massimo un commit ogni 10 s (GitHub limita le scritture troppo fitte) */
+const GH_MIN_GAP_MS = 10_000;
+/** chi modifica di continuo salva comunque almeno ogni 20 s */
+const GH_MAX_WAIT_MS = 20_000;
+const GH_POLL_MS = 30_000;
+
+interface GhBase {
+  /** sha del file su GitHub (null = file non ancora creato) */
+  sha: string | null;
+  etag: string | null;
+  /** i dati di quella versione: il punto di partenza per capire cosa è cambiato qui */
+  data: AppData;
+}
+
+interface GhSession {
+  cfg: GitHubConfig;
+  key: string;
+  base: GhBase;
+  /** il file su GitHub non è leggibile: niente salvataggi finché non viene sistemato */
+  blocked: boolean;
+  /** errore che richiede l'utente (token, permessi): niente tentativi automatici */
+  halted: boolean;
+  user: string;
+}
+
+let gh: GhSession | null = null;
+let ghChain: Promise<unknown> = Promise.resolve();
+let ghSaveTimer: number | undefined;
+let ghRetryTimer: number | undefined;
+let ghPollTimer: number | undefined;
+let ghDirtySince = 0;
+let ghLastCommitAt = 0;
+let ghLastCheckAt = 0;
+let ghRetryMs = 0;
+
+const ghKeyOf = (c: GitHubConfig) => `${c.owner}/${c.repo}@${c.branch}:${cleanPath(c.path)}`.toLowerCase();
+
+/** una sola operazione con GitHub alla volta: una lettura e una scrittura non si incrociano mai */
+function ghLocked<T>(fn: () => Promise<T>): Promise<T> {
+  const run = ghChain.then(fn, fn);
+  ghChain = run.catch(() => undefined);
+  return run;
+}
+
+function readGhCache(key: string): { base: GhBase | null; local: AppData | null } {
+  try {
+    const b = JSON.parse(localStorage.getItem(GH_BASE_KEY) ?? 'null') as
+      | { key: string; sha: string | null; etag: string | null; data: AppData }
+      | null;
+    const l = JSON.parse(localStorage.getItem(GH_LOCAL_KEY) ?? 'null') as { key: string; data: AppData } | null;
+    const base = b && b.key === key ? { sha: b.sha ?? null, etag: b.etag ?? null, data: migrate(b.data) } : null;
+    // senza la versione di partenza la copia locale non serve: non si saprebbe cosa è cambiato qui
+    return { base, local: base && l && l.key === key ? migrate(l.data) : null };
+  } catch {
+    return { base: null, local: null };
+  }
+}
+
+function clearGhCache() {
+  try {
+    localStorage.removeItem(GH_BASE_KEY);
+    localStorage.removeItem(GH_LOCAL_KEY);
+  } catch {
+    /* niente da togliere */
+  }
+}
+
+function writeGhBase() {
+  if (!gh) return;
+  try {
+    localStorage.setItem(GH_BASE_KEY, JSON.stringify({ key: gh.key, sha: gh.base.sha, etag: gh.base.etag, data: gh.base.data }));
+  } catch {
+    // spazio esaurito: meglio nessuna copia che una copia vecchia (si unirebbe male alla prossima apertura)
+    clearGhCache();
+  }
+}
+
+function writeGhLocal() {
+  if (!gh) return;
+  try {
+    localStorage.setItem(GH_LOCAL_KEY, JSON.stringify({ key: gh.key, data: sharedData(state.data) }));
+  } catch {
+    if (!localWarned) {
+      localWarned = true;
+      console.warn('Gantt Planner: impossibile salvare la copia locale (spazio esaurito?)');
+    }
+  }
+}
+
+function setGh(patch: Partial<GitHubStatus>) {
+  if (!state.sync.github) return;
+  setSync({ github: { ...state.sync.github, ...patch } });
+}
+
+/** ci sono modifiche fatte qui e non ancora su GitHub */
+function ghDirty(): boolean {
+  return !!gh && diffOps(gh.base.data, state.data).length > 0;
+}
+
+function ghClearError() {
+  if (state.sync.error?.startsWith('gh.')) setSync({ error: null });
+}
+
+function ghOk() {
+  ghRetryMs = 0;
+  ghLastCheckAt = Date.now();
+  setSync({ online: true });
+  setGh({ checkedAt: new Date().toISOString() });
+  if (state.sync.error === 'gh.err.network' || state.sync.error === 'gh.err.rateLimit') ghClearError();
+}
+
+/**
+ * Un errore di GitHub: rete e limiti si riprovano da soli; token, permessi e file rovinato no.
+ * `quiet`: un controllo periodico non riuscito non mostra avvisi (lo dice già la barra di stato).
+ */
+function ghFailed(err: unknown, retry: (() => void) | null, quiet = false) {
+  if (!gh) return;
+  const kind = err instanceof GitHubError ? err.kind : 'network';
+  if (!(err instanceof GitHubError)) console.warn('Gantt Planner: errore con GitHub', err);
+  if (kind === 'network' || kind === 'rateLimit' || kind === 'conflict') {
+    const first = kind === 'rateLimit' ? 60_000 : 5000;
+    ghRetryMs = Math.min(5 * 60_000, ghRetryMs ? ghRetryMs * 2 : first);
+    if (quiet) setSync({ online: false });
+    else setSync({ online: false, error: kind === 'rateLimit' ? 'gh.err.rateLimit' : 'gh.err.network' });
+    if (retry) {
+      window.clearTimeout(ghRetryTimer);
+      ghRetryTimer = window.setTimeout(retry, ghRetryMs);
+    }
+    return;
+  }
+  if (kind === 'invalid') gh.blocked = true;
+  else gh.halted = true;
+  if (kind === 'forbidden') {
+    setGh({ canWrite: false });
+  }
+  setSync({ error: `gh.err.${kind}` as TKey, online: kind === 'invalid' || kind === 'forbidden' });
+}
+
+/**
+ * Dopo un'unione i record rimasti identici tengono lo stesso oggetto: l'interfaccia non ridisegna
+ * ciò che non è cambiato e un campo in corso di scrittura (es. le etichette di una nota) non si azzera.
+ */
+function keepUnchanged(prev: AppData, next: AppData): AppData {
+  const keep = <T extends { id: string }>(a: T[], b: T[]): T[] => {
+    const old = new Map(a.map((r) => [r.id, r]));
+    return b.map((r) => {
+      const o = old.get(r.id);
+      return o && JSON.stringify(o) === JSON.stringify(r) ? o : r;
+    });
+  };
+  return {
+    ...next,
+    nodes: keep(prev.nodes, next.nodes),
+    people: keep(prev.people, next.people),
+    absences: keep(prev.absences, next.absences),
+    notes: keep(prev.notes, next.notes),
+  };
+}
+
+/** unisce la versione remota alle modifiche fatte qui (che restano e partono al prossimo salvataggio) */
+function ghApplyRemote(remote: AppData, sha: string, etag: string | null) {
+  const g = gh!;
+  const collapsed = state.data.nodes.length ? currentCollapsed() : readCollapsed();
+  const { data, theirs, dropped } = rebase(g.base.data, state.data, remote);
+  // «annulla» non deve cancellare il lavoro degli altri: le loro modifiche entrano anche nelle istantanee
+  for (const snap of past) applyOps(snap, theirs);
+  for (const snap of future) applyOps(snap, theirs);
+  g.base = { sha, etag, data: remote };
+  state = { ...state, data: keepUnchanged(state.data, withLocalCollapse(migrate(data), collapsed)) };
+  ensureSelection();
+  writeGhBase();
+  writeGhLocal();
+  for (const d of dropped) pushNotice({ text: 'notice.deletedUnknown', vars: { name: d.label || '…' } });
+  setSync({ pending: ghDirty() ? 1 : 0 });
+  emit();
+}
+
+/** legge il file su GitHub e unisce le modifiche altrui (da chiamare dentro ghLocked) */
+async function ghPullInner(): Promise<void> {
+  const g = gh;
+  if (!g) return;
+  const r = await readFile(g.cfg, g.base.sha ? g.base.etag : null);
+  if (gh !== g) return;
+  if (r === 'unchanged') {
+    ghOk();
+    return;
+  }
+  if (r === null) {
+    // il file non c'è ancora (repository nuovo) o è stato tolto: il prossimo salvataggio lo crea
+    // con tutti i dati di questo browser, mai con un archivio vuoto
+    if (g.base.sha !== null) {
+      g.base = { sha: null, etag: null, data: emptyData() };
+      writeGhBase();
+    }
+    g.blocked = false;
+    ghOk();
+    return;
+  }
+  if (r.sha === g.base.sha) {
+    g.base.etag = r.etag;
+    g.blocked = false;
+    ghOk();
+    return;
+  }
+  const remote = migrate(decodeData(r.text)); // file illeggibile → errore 'invalid': non si sovrascrive
+  g.blocked = false;
+  if (state.sync.error === 'gh.err.invalid') ghClearError();
+  ghApplyRemote(remote, r.sha, r.etag);
+  ghOk();
+}
+
+function ghPull(): Promise<void> {
+  return ghLocked(async () => {
+    try {
+      await ghPullInner();
+    } catch (err) {
+      ghFailed(err, null, true); // la lettura si ripete comunque al prossimo controllo
+    }
+  });
+}
+
+/** salva adesso su GitHub le modifiche fatte qui */
+function ghSaveNow(): Promise<void> {
+  return ghLocked(async () => {
+    const g = gh;
+    if (!g || g.blocked || g.halted || !canEdit()) return;
+    window.clearTimeout(ghSaveTimer);
+    ghSaveTimer = undefined;
+    ghDirtySince = 0;
+    let saved = false;
+    setSync({ saving: true });
+    try {
+      for (let attempt = 0; attempt < 6 && !saved; attempt++) {
+        const snapshot = cloneData(sharedData(state.data)); // esattamente ciò che si manda
+        const ops = diffOps(g.base.data, snapshot);
+        if (!ops.length) break;
+        try {
+          const text = encodeData(snapshot, g.user || state.ui.userName.trim() || g.cfg.owner);
+          const message = describeChanges(ops, g.base.data, snapshot, state.ui.lang);
+          const r = await writeFile(g.cfg, text, g.base.sha, message);
+          if (gh !== g) return;
+          g.base = { sha: r.sha, etag: null, data: snapshot };
+          writeGhBase();
+          ghLastCommitAt = Date.now();
+          saved = true;
+          setSync({ savedAt: r.at });
+          setGh({ lastCommitUrl: r.commitUrl });
+          ghOk();
+        } catch (err) {
+          if (!(err instanceof GitHubError) || err.kind !== 'conflict') throw err;
+          // un altro ha salvato nel frattempo: si prende la sua versione, si uniscono le modifiche, si riprova
+          await ghPullInner();
+          if (gh !== g || g.blocked) return;
+        }
+      }
+      if (!saved && ghDirty()) throw new GitHubError('conflict', 409, 'troppi salvataggi contemporanei');
+    } catch (err) {
+      if (gh === g) ghFailed(err, () => void ghSaveNow());
+    } finally {
+      if (gh === g) {
+        const dirty = ghDirty();
+        setSync({ saving: false, pending: dirty ? 1 : 0 });
+        // modifiche fatte mentre si salvava: partono con il prossimo giro
+        if (saved && dirty) scheduleGhSave();
+      }
+    }
+  });
+}
+
+function scheduleGhSave(delay = GH_DEBOUNCE_MS) {
+  if (!gh || gh.blocked || gh.halted || typeof window === 'undefined') return;
+  const now = Date.now();
+  if (!ghDirtySince) ghDirtySince = now;
+  const earliest = ghLastCommitAt + GH_MIN_GAP_MS;
+  const wanted = Math.max(now + delay, earliest);
+  const latest = Math.max(ghDirtySince + GH_MAX_WAIT_MS, earliest);
+  window.clearTimeout(ghSaveTimer);
+  ghSaveTimer = window.setTimeout(() => {
+    ghSaveTimer = undefined;
+    void ghSaveNow();
+  }, Math.max(0, Math.min(wanted, latest) - now));
+}
+
+/** dopo ogni modifica: copia locale subito, GitHub dopo qualche secondo di calma */
+function ghLocalChanged() {
+  writeGhLocal();
+  if (!state.sync.pending) state = { ...state, sync: { ...state.sync, pending: 1 } };
+  scheduleGhSave();
+}
+
+const ghVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
+
+/** controllo delle modifiche altrui (al massimo uno ogni 5 s) */
+function ghCheck() {
+  if (!gh || gh.halted || !ghVisible() || Date.now() - ghLastCheckAt < 5000) return;
+  ghLastCheckAt = Date.now();
+  void ghPull().then(() => {
+    if (ghDirty() && ghSaveTimer === undefined) scheduleGhSave(0);
+  });
+}
+
+function onGhVisibility() {
+  if (!gh) return;
+  // si cambia scheda o si chiude: le modifiche partono subito
+  if (!ghVisible()) {
+    if (ghDirty()) void ghSaveNow();
+  } else {
+    ghCheck();
+  }
+}
+
+function onGhOnline() {
+  if (!gh) return;
+  ghRetryMs = 0;
+  ghLastCheckAt = 0;
+  ghCheck();
+  if (ghDirty()) scheduleGhSave(0);
+}
+
+function startGhTimers() {
+  stopGhTimers();
+  const tick = () => {
+    ghCheck();
+    ghPollTimer = window.setTimeout(tick, GH_POLL_MS);
+  };
+  ghPollTimer = window.setTimeout(tick, GH_POLL_MS);
+  document.addEventListener('visibilitychange', onGhVisibility);
+  window.addEventListener('focus', ghCheck);
+  window.addEventListener('online', onGhOnline);
+}
+
+function stopGhTimers() {
+  if (typeof window === 'undefined') return;
+  window.clearTimeout(ghPollTimer);
+  window.clearTimeout(ghSaveTimer);
+  window.clearTimeout(ghRetryTimer);
+  ghPollTimer = ghSaveTimer = ghRetryTimer = undefined;
+  document.removeEventListener('visibilitychange', onGhVisibility);
+  window.removeEventListener('focus', ghCheck);
+  window.removeEventListener('online', onGhOnline);
+}
+
+async function startGitHub(cfg: GitHubConfig): Promise<void> {
+  stopGhTimers();
+  const key = ghKeyOf(cfg);
+  const cache = readGhCache(key);
+  const g: GhSession = {
+    cfg,
+    key,
+    base: cache.base ?? { sha: null, etag: null, data: emptyData() },
+    blocked: false,
+    halted: false,
+    user: '',
+  };
+  gh = g;
+  ghRetryMs = 0;
+  ghLastCommitAt = 0;
+  ghLastCheckAt = 0;
+  ghDirtySince = 0;
+  past = [];
+  future = [];
+  // si parte dalla copia locale (anche senza rete), poi si aggiorna da GitHub
+  state = { ...state, data: withLocalCollapse(cache.local ?? cache.base?.data ?? emptyData()) };
+  ensureSelection();
+  setAuth({ ready: true, mode: 'browser', enabled: false, level: 'admin', levels: [], ospiti: false, who: '' });
+  setSync({
+    mode: 'github',
+    ready: false,
+    online: false,
+    saving: false,
+    pending: 0,
+    error: null,
+    notices: [],
+    localOnly: null,
+    savedAt: null,
+    github: {
+      repo: `${cfg.owner}/${cfg.repo}`,
+      path: cleanPath(cfg.path),
+      branch: cfg.branch,
+      user: '',
+      private: null,
+      canWrite: true,
+      historyUrl: historyUrl(cfg, cfg.branch),
+      lastCommitUrl: null,
+      checkedAt: null,
+    },
+  });
+
+  try {
+    const [user, repo] = await Promise.all([getUser(cfg), getRepo(cfg)]);
+    if (gh !== g) return;
+    g.user = user.name || user.login;
+    if (!state.ui.userName.trim()) setUi({ userName: g.user });
+    const branch = cfg.branch || repo.defaultBranch;
+    setGh({ user: user.login, private: repo.private, canWrite: repo.canPush, branch, historyUrl: historyUrl(cfg, branch) });
+    if (!repo.canPush) setAuth({ level: 'lettura' });
+    await ghLocked(ghPullInner);
+    if (gh !== g) return;
+    // archivio su GitHub ancora vuoto e progetti rimasti solo in questo browser: si propone di trasferirli
+    const browserData = readLocalData();
+    if (canEdit() && isEmpty(state.data) && browserData && !isEmpty(browserData)) setSync({ localOnly: browserData });
+  } catch (err) {
+    if (gh === g) ghFailed(err, null);
+  }
+  if (gh !== g) return;
+  setSync({ ready: true, pending: ghDirty() ? 1 : 0 });
+  startGhTimers();
+  // modifiche rimaste in sospeso dall'ultima volta (pagina chiusa prima del salvataggio)
+  if (ghDirty() && !g.halted && !g.blocked) scheduleGhSave(0);
+}
+
+/** collega questo browser a un archivio su GitHub (la configurazione resta solo in questo browser) */
+export async function connectGitHub(cfg: GitHubConfig): Promise<void> {
+  // i dati della modalità «solo browser» restano al loro posto: tornano scollegando GitHub
+  if (state.sync.mode === 'browser') persistLocal();
+  saveGitHubConfig(cfg);
+  await startGitHub(cfg);
+}
+
+/** scollega GitHub da questo browser: si cancellano token e copie locali dell'archivio */
+export function disconnectGitHub(): void {
+  stopGhTimers();
+  gh = null;
+  clearGitHubConfig();
+  clearGhCache();
+  past = [];
+  future = [];
+  state = { ...state, data: readLocalData() ?? demoData() };
+  ensureSelection();
+  setAuth({ ready: true, mode: 'browser', enabled: false, level: 'admin' });
+  setSync({
+    mode: 'browser',
+    github: null,
+    error: null,
+    saving: false,
+    pending: 0,
+    online: false,
+    localOnly: null,
+    notices: [],
+    savedAt: null,
+  });
+}
+
+/** «Aggiorna»: salva subito le modifiche di qui e legge quelle degli altri (sblocca anche dopo un errore) */
+export async function syncGitHubNow(): Promise<void> {
+  const g = gh;
+  if (!g) return;
+  g.halted = false;
+  ghRetryMs = 0;
+  ghClearError();
+  if (ghDirty()) await ghSaveNow();
+  if (gh !== g) return;
+  ghLastCheckAt = Date.now();
+  await ghPull();
+}
+
+/** modifiche non ancora arrivate su GitHub: chiudendo la pagina si avvisa */
+export function hasUnsavedChanges(): boolean {
+  return state.sync.mode === 'github' && (state.sync.saving || ghDirty());
+}
+
 // ---------------------------------------------------------------- azioni albero
 
 export function newNode(parentId: string | null, name: string): TaskNode {
@@ -1104,11 +1638,20 @@ export function addNode(parentId: string | null, name: string, afterId?: string 
   return node.id;
 }
 
+/** il nodo ha già questi valori: la modifica non cambierebbe nulla */
+function unchanged(id: string, patch: Partial<TaskNode>): boolean {
+  const cur = state.data.nodes.find((n) => n.id === id) as unknown as Record<string, unknown> | undefined;
+  return !!cur && Object.entries(patch).every(([k, v]) => same(cur[k], v));
+}
+
 export function updateNode(id: string, patch: Partial<TaskNode>, history = true) {
-  if (state.sync.mode === 'shared' && onlyCollapse(patch)) {
+  if (state.sync.mode !== 'browser' && onlyCollapse(patch)) {
     setCollapsedLocal([id], !!patch.collapsed);
     return;
   }
+  // una cella confermata con Invio viene confermata di nuovo quando perde il fuoco: la seconda
+  // volta non cambia nulla e non deve diventare un passo in più di «annulla»
+  if (unchanged(id, patch)) return;
   mutate((d) => {
     d.nodes = d.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n));
   }, history);
@@ -1116,13 +1659,14 @@ export function updateNode(id: string, patch: Partial<TaskNode>, history = true)
 
 export function updateNodes(patches: Record<string, Partial<TaskNode>>, history = true) {
   const entries = Object.entries(patches);
-  if (state.sync.mode === 'shared' && entries.length && entries.every(([, p]) => onlyCollapse(p))) {
+  if (state.sync.mode !== 'browser' && entries.length && entries.every(([, p]) => onlyCollapse(p))) {
     const open = entries.filter(([, p]) => !p.collapsed).map(([id]) => id);
     const close = entries.filter(([, p]) => p.collapsed).map(([id]) => id);
     if (open.length) setCollapsedLocal(open, false);
     if (close.length) setCollapsedLocal(close, true);
     return;
   }
+  if (entries.every(([id, p]) => unchanged(id, p))) return;
   mutate((d) => {
     d.nodes = d.nodes.map((n) => (patches[n.id] ? { ...n, ...patches[n.id] } : n));
   }, history);
@@ -1163,7 +1707,7 @@ export function indentNode(id: string) {
     rest.splice(idx + 1, 0, moved);
     d.nodes = rest;
   });
-  if (state.sync.mode === 'shared') saveCollapsed();
+  if (state.sync.mode !== 'browser') saveCollapsed();
 }
 
 /** porta il nodo allo stesso livello del genitore */
@@ -1212,7 +1756,7 @@ export function moveNode(id: string, dir: -1 | 1) {
 
 export function setCollapsedAll(rootId: string | null, collapsed: boolean) {
   const ids = rootId ? [rootId, ...descendantIds(state.data.nodes, rootId)] : state.data.nodes.map((n) => n.id);
-  if (state.sync.mode === 'shared') {
+  if (state.sync.mode !== 'browser') {
     setCollapsedLocal(ids, collapsed);
     return;
   }
@@ -1225,7 +1769,7 @@ export function setCollapsedAll(rootId: string | null, collapsed: boolean) {
 export function toggleCollapsed(id: string) {
   const node = state.data.nodes.find((n) => n.id === id);
   if (!node) return;
-  if (state.sync.mode === 'shared') {
+  if (state.sync.mode !== 'browser') {
     setCollapsedLocal([id], !node.collapsed);
     return;
   }
