@@ -84,9 +84,9 @@ test('i dati restano nel browser dopo aver ricaricato la pagina', async ({ page 
 test('carico di lavoro calcolato dai dati di esempio', async ({ page }) => {
   await page.goto('/');
   await page.locator('.topbar .nav button', { hasText: 'Carico di lavoro' }).click();
-  // Programma PLC: 120 h su 18 giorni lavorativi (2 di malattia) → 6,67 h/giorno = 83 %
+  // Programma PLC: 120 h su 17 giorni lavorativi (2 di malattia, 1 di ponte aziendale) → 7,06 h/giorno = 88 %
   const erika = page.locator('tr', { hasText: 'Erika Mustermann' }).first();
-  await expect(erika).toContainText('83 %');
+  await expect(erika).toContainText('88 %');
 });
 
 test('backup JSON: esporta, svuota tutto e reimporta', async ({ page }, testInfo) => {

@@ -32,6 +32,8 @@ const absences: Absence[] = [
   { id: 'a1', personId: P.mec, start: '2026-08-10', end: '2026-08-21', type: 'VACATION', note: 'Ferie estive' },
   { id: 'a2', personId: P.sw, start: '2026-08-03', end: '2026-08-04', type: 'SICK', note: '' },
   { id: 'a3', personId: P.mon, start: '2026-10-05', end: '2026-10-06', type: 'OTHER', note: 'Corso sicurezza' },
+  // chiusura aziendale: nessuna persona (personId null), vale per tutti
+  { id: 'a4', personId: null, start: '2026-08-14', end: '2026-08-14', type: 'CLOSURE', note: 'Ponte di prova' },
 ];
 
 interface Seed {

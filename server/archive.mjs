@@ -411,7 +411,10 @@ function labelOf(t, rec) {
   if (!rec) return '';
   if (t === 'node' || t === 'person') return String(rec.name ?? '');
   if (t === 'note') return String(rec.title || '').slice(0, 80);
-  if (t === 'absence') return `${findIn('person', rec.personId)?.name ?? ''} ${rec.start}–${rec.end}`.trim();
+  if (t === 'absence') {
+    const who = rec.personId === null ? 'Chiusura aziendale' : (findIn('person', rec.personId)?.name ?? '');
+    return `${who} ${rec.start}–${rec.end}`.trim();
+  }
   return '';
 }
 
@@ -495,7 +498,8 @@ async function applyNow({ ops, session, client = '', batch = '' }) {
       }
       const missing =
         (o.t === 'node' && rec.parentId !== null && !findIn('node', rec.parentId)) ||
-        (o.t === 'absence' && !findIn('person', rec.personId)) ||
+        // una chiusura aziendale (personId null) non dipende da nessuna persona
+        (o.t === 'absence' && rec.personId !== null && !findIn('person', rec.personId)) ||
         (o.t === 'note' && !findIn('node', rec.nodeId));
       if (missing) {
         const ref = o.t === 'node' ? rec.parentId : o.t === 'note' ? rec.nodeId : rec.personId;
@@ -524,7 +528,7 @@ async function applyNow({ ops, session, client = '', batch = '' }) {
         const refBroken =
           (o.t === 'node' && f === 'parentId' && v !== null && (!findIn('node', v) || isDescendant(v, o.id))) ||
           (o.t === 'node' && f === 'assigneeId' && v !== null && !findIn('person', v)) ||
-          (o.t === 'absence' && f === 'personId' && !findIn('person', v)) ||
+          (o.t === 'absence' && f === 'personId' && v !== null && !findIn('person', v)) ||
           (o.t === 'note' && f === 'nodeId' && !findIn('node', v));
         if (refBroken) {
           partial = true;

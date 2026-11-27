@@ -4,14 +4,19 @@ export type Status = 'TODO' | 'IN_PROGRESS' | 'DONE' | 'CANCELLED';
 
 export const STATUSES: Status[] = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED'];
 
-export type AbsenceType = 'VACATION' | 'SICK' | 'OTHER';
+/** «CLOSURE» è la chiusura aziendale (festività, ponte): non riguarda una persona, vale per tutti */
+export type AbsenceType = 'VACATION' | 'SICK' | 'OTHER' | 'CLOSURE';
 
-export const ABSENCE_TYPES: AbsenceType[] = ['VACATION', 'SICK', 'OTHER'];
+/** motivi di assenza di una persona: ferie, malattia, altro */
+export const PERSONAL_ABSENCE_TYPES: AbsenceType[] = ['VACATION', 'SICK', 'OTHER'];
+
+export const ABSENCE_TYPES: AbsenceType[] = [...PERSONAL_ABSENCE_TYPES, 'CLOSURE'];
 
 export const ABSENCE_COLORS: Record<AbsenceType, string> = {
   VACATION: '#2f9bc9',
   SICK: '#c0398f',
   OTHER: '#7a8697',
+  CLOSURE: '#9a5b13',
 };
 
 export interface Person {
@@ -28,10 +33,14 @@ export interface Person {
   about?: string;
 }
 
-/** Giorni in cui la persona non è disponibile (ferie, malattia, altro) */
+/**
+ * Giorni in cui la persona non è disponibile (ferie, malattia, altro).
+ * Una chiusura aziendale (type CLOSURE) ha personId null e vale per tutti i responsabili.
+ * Per ogni altro tipo personId è sempre una persona esistente.
+ */
 export interface Absence {
   id: string;
-  personId: string;
+  personId: string | null;
   start: string; // ISO yyyy-mm-dd
   end: string; // ISO yyyy-mm-dd
   type: AbsenceType;

@@ -37,6 +37,8 @@ export function fieldLabel(lang: Lang, t: RecordKind, field: string): string {
 }
 
 export function fieldValue(lang: Lang, data: AppData, t: RecordKind, field: string, value: unknown): string {
+  // una chiusura aziendale non ha persona: per lei il valore «nessuna» vuol dire «tutti»
+  if (t === 'absence' && field === 'personId' && value === null) return translate(lang, 'absence.everyone');
   if (value === null || value === undefined || value === '') return translate(lang, 'notice.empty');
   if (typeof value === 'boolean') return translate(lang, value ? 'notice.yes' : 'notice.no');
   if ((field === 'start' || field === 'end') && typeof value === 'string') return formatDate(value, lang);

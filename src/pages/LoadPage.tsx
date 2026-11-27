@@ -3,6 +3,7 @@ import { setUi, updateNode, useStore } from '../store';
 import { Avatar, Modal, fmtHours, useT } from '../ui';
 import { computeAll } from '../utils/tree';
 import {
+  absentDays,
   buildAbsenceMap,
   capacityOf,
   computeLoad,
@@ -215,9 +216,10 @@ export function LoadPage() {
       });
   }, [selPerson, data.nodes, data.people, computed, archivedRoots, t]);
 
+  // giorni bloccati nel Gantt personale: assenze proprie e chiusure aziendali
   const personBlocked = React.useMemo(() => {
     if (!selPerson) return undefined;
-    return new Set(Object.keys(absMap[selPerson] ?? {}));
+    return absentDays(absMap, selPerson);
   }, [selPerson, absMap]);
 
   const shift = (n: number) => setAnchor(addDays(anchor, n * (gran === 'day' ? 7 : 28)));

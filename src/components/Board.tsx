@@ -25,6 +25,7 @@ import type { Status, TaskNode } from '../types';
 import { STATUSES } from '../types';
 import { ancestorIds, computeAll, flatten, pathOf } from '../utils/tree';
 import { diffDays, todayISO } from '../utils/dates';
+import { closureDays } from '../utils/load';
 import { projectColors } from '../utils/projectColors';
 import { translate, type TKey } from '../i18n';
 
@@ -54,6 +55,8 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
   const { data, ui } = useStore();
   const { t, lang } = useT();
   const canEdit = useCanEdit();
+  // le chiusure aziendali (ponti, festività) valgono per tutti: il Gantt le mostra come giorni bloccati
+  const closedDays = React.useMemo(() => closureDays(data.absences), [data.absences]);
   const [selectedId, setSelectedId] = React.useState<string | null>(rootId);
   const [search, setSearch] = React.useState('');
   const [fStatus, setFStatus] = React.useState<'' | Status>('');
@@ -427,6 +430,7 @@ export function Board({ rootId, height, showArchive = false, focus = null }: Pro
           selectedId={selectedId}
           onSelect={setSelectedId}
           onChangeDates={onBarChange}
+          blockedDays={closedDays}
           scrollRef={ganttRef as React.RefObject<HTMLDivElement>}
           onScroll={syncFrom('gantt')}
         />

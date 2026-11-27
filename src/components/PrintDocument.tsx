@@ -649,7 +649,7 @@ export function PrintDocument({
                 .sort((a, b) => (a.start < b.start ? -1 : 1))
                 .map((a) => (
                   <tr key={a.id}>
-                    <td>{peopleNames[a.personId] ?? ''}</td>
+                    <td>{a.personId === null ? t('absence.everyone') : (peopleNames[a.personId] ?? '')}</td>
                     <td>{formatDate(a.start, lang)}</td>
                     <td>{formatDate(a.end, lang)}</td>
                     <td>{t(`absence.${a.type}` as TKey)}</td>

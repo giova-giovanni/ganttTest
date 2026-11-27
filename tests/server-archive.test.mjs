@@ -187,6 +187,20 @@ test('eliminazioni a cascata: ramo con figli e note; responsabile con assenze e 
 
 // ------------------------------------------------------------------ registro e ripristino
 
+test('chiusure aziendali: accettate anche senza responsabili; le assenze verso una persona inesistente no', async () => {
+  await fresh({ 'gantt-dati.json': envelope(1, base()) }); // nessun responsabile in archivio
+  await openArchive();
+  const ponte = { id: 'c1', personId: null, start: '2026-03-02', end: '2026-03-02', type: 'CLOSURE', note: 'Ponte' };
+  assert.equal((await batch(admin, [{ op: 'add', t: 'absence', rec: ponte }])).ok, true);
+  assert.equal(_archive().data.absences.length, 1);
+  assert.equal(_archive().data.absences[0].personId, null);
+  const r = await batch(admin, [
+    { op: 'add', t: 'absence', rec: { id: 'v1', personId: 'nessuno', start: '2026-03-03', end: '2026-03-03', type: 'VACATION', note: '' } },
+  ]);
+  assert.equal(r.skipped[0].reason, 'eliminato');
+  assert.equal(_archive().data.absences.length, 1);
+});
+
 test('spegnimento brusco: all’avvio si riapplicano le modifiche del registro', async () => {
   const { main } = await fresh({ 'gantt-dati.json': envelope(1, base()) });
   await openArchive();
