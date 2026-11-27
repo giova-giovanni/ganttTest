@@ -16,7 +16,8 @@ describe('dati di esempio', () => {
       if (n.start && n.end) expect(n.start <= n.end).toBe(true);
     }
     for (const note of demo.notes) expect(ids.has(note.nodeId)).toBe(true);
-    for (const a of demo.absences) expect(people.has(a.personId)).toBe(true);
+    // una chiusura aziendale non ha persona; le altre assenze puntano a un responsabile esistente
+    for (const a of demo.absences) expect(a.personId === null ? a.type === 'CLOSURE' : people.has(a.personId)).toBe(true);
   });
 
   it('sono spostati sulla settimana corrente', () => {
@@ -29,7 +30,7 @@ describe('dati di esempio', () => {
     const m = migrate(demo);
     expect(m.nodes).toHaveLength(demo.nodes.length);
     expect(m.people).toHaveLength(5);
-    expect(m.absences).toHaveLength(3);
+    expect(m.absences).toHaveLength(4);
     expect(m.notes).toHaveLength(3);
   });
 });

@@ -1,7 +1,7 @@
 import React from 'react';
 import { addAbsence, deleteAbsence, useStore } from '../store';
 import { Avatar, Modal, useCanAdmin, useIsAdmin, useT } from '../ui';
-import { ABSENCE_COLORS, ABSENCE_TYPES, type AbsenceType } from '../types';
+import { ABSENCE_COLORS, ABSENCE_TYPES, PERSONAL_ABSENCE_TYPES, type AbsenceType } from '../types';
 import { translate, type TKey } from '../i18n';
 import {
   addDays,
@@ -18,6 +18,9 @@ import {
   workingDays,
 } from '../utils/dates';
 
+/** giorni per motivo; le chiusure aziendali sono nel conteggio ma non appartengono a nessuna persona */
+const zeroCounts = (): Record<AbsenceType, number> => ({ VACATION: 0, SICK: 0, OTHER: 0, CLOSURE: 0 });
+
 export function AbsenceDialog({ onClose, personId }: { onClose: () => void; personId?: string | null }) {
   const { data } = useStore();
   const { t, lang } = useT();
@@ -32,14 +35,16 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
     type: 'VACATION' as AbsenceType,
     note: '',
   });
+  // una chiusura aziendale (ponte, festività) non riguarda una persona: vale per tutti
+  const closure = form.type === 'CLOSURE';
 
   const peopleById = React.useMemo(() => Object.fromEntries(data.people.map((p) => [p.id, p])), [data.people]);
 
   const add = () => {
-    if (!form.personId || !form.start || !form.end) return;
+    if (!canAdmin || (!closure && !form.personId) || !form.start || !form.end) return;
     const start = form.start <= form.end ? form.start : form.end;
     const end = form.start <= form.end ? form.end : form.start;
-    addAbsence({ personId: form.personId, start, end, type: form.type, note: form.note.trim() });
+    addAbsence({ personId: closure ? null : form.personId, start, end, type: form.type, note: form.note.trim() });
     setForm({ ...form, note: '' });
   };
 
@@ -81,15 +86,32 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
   const summary = React.useMemo(() => {
     const rows: Record<string, Record<AbsenceType, number>> = {};
     for (const a of ofYear) {
+      if (a.personId === null) continue; // le chiusure non sono di nessuno: si contano a parte
       const days = daysInYear(a.start, a.end);
       if (days <= 0) continue;
-      const r = (rows[a.personId] ||= { VACATION: 0, SICK: 0, OTHER: 0 });
+      const r = (rows[a.personId] ||= zeroCounts());
       r[a.type] += days;
     }
     return data.people
       .filter((p) => rows[p.id])
-      .map((p) => ({ person: p, ...rows[p.id], total: ABSENCE_TYPES.reduce((s, ty) => s + rows[p.id][ty], 0) }));
+      .map((p) => ({
+        person: p,
+        ...rows[p.id],
+        total: PERSONAL_ABSENCE_TYPES.reduce((s, ty) => s + rows[p.id][ty], 0),
+      }));
   }, [ofYear, daysInYear, data.people]);
+
+  /** giorni lavorativi di chiusura aziendale nell'anno: ogni giorno conta una volta, anche con due chiusure sovrapposte */
+  const closureDaysYear = React.useMemo(() => {
+    const days = new Set<string>();
+    for (const a of ofYear) {
+      if (a.type !== 'CLOSURE') continue;
+      const from = a.start > yearStart ? a.start : yearStart;
+      const to = a.end < yearEnd ? a.end : yearEnd;
+      for (const d of workingDays(from, to)) days.add(d);
+    }
+    return days.size;
+  }, [ofYear, yearStart, yearEnd]);
 
   const changeYear = (y: number) => {
     setYear(y);
@@ -109,15 +131,20 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
       const from = a.start <= a.end ? a.start : a.end;
       const to = a.start <= a.end ? a.end : a.start;
       for (const d of workingDays(from, to)) {
-        (m[d] ||= []).push({
-          name: peopleById[a.personId]?.name ?? '?',
+        const item = {
+          // una chiusura è una sola voce per giorno; un’assenza personale porta il nome della persona
+          name: a.personId === null ? translate(lang, 'absence.closureShort') : (peopleById[a.personId]?.name ?? '?'),
           type: a.type,
           color: ABSENCE_COLORS[a.type],
-        });
+        };
+        const list = (m[d] ||= []);
+        // le chiusure per prime: valgono per tutti, anche quando il giorno ha molte assenze
+        if (a.personId === null) list.unshift(item);
+        else list.push(item);
       }
     }
     return m;
-  }, [data.absences, peopleById]);
+  }, [data.absences, peopleById, lang]);
 
   const inputStyle: React.CSSProperties = {
     border: '1px solid var(--border-strong)',
@@ -147,14 +174,19 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
             <label>{t('absence.person')}</label>
             <select
               style={inputStyle}
-              value={form.personId}
+              value={closure ? '' : form.personId}
+              disabled={closure}
               onChange={(e) => setForm({ ...form, personId: e.target.value })}
             >
-              {data.people.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
+              {closure ? (
+                <option value="">{t('absence.everyone')}</option>
+              ) : (
+                data.people.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))
+              )}
             </select>
           </div>
           <div className="field" style={{ margin: 0 }}>
@@ -194,10 +226,15 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
               onKeyDown={(e) => e.key === 'Enter' && add()}
             />
           </div>
-          <button className="btn primary" onClick={add} disabled={!form.personId || !canAdmin}>
+          <button className="btn primary" onClick={add} disabled={(!closure && !form.personId) || !canAdmin}>
             + {t('btn.add')}
           </button>
         </div>
+        {closure && (
+          <div className="hint" style={{ marginBottom: 10 }}>
+            {t('absence.closureHint')}
+          </div>
+        )}
         {!isAdmin && <div className="hint" style={{ marginBottom: 10 }}>{t('auth.needAdmin')}</div>}
 
         <div className="cal-head">
@@ -265,13 +302,18 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
         <div className="hint" style={{ margin: '4px 0 8px' }}>
           {t('absence.yearHint')}
         </div>
+        {closureDaysYear > 0 && (
+          <div className="hint" style={{ margin: '0 0 8px' }}>
+            {t('absence.closureYear', { y: year, d: closureDaysYear })}
+          </div>
+        )}
 
         {summary.length > 0 && (
           <table className="data" style={{ marginBottom: 14 }}>
             <thead>
               <tr>
                 <th>{t('absence.person')}</th>
-                {ABSENCE_TYPES.map((ty) => (
+                {PERSONAL_ABSENCE_TYPES.map((ty) => (
                   <th key={ty} className="num">
                     {translate(lang, `absence.${ty}` as TKey)}
                   </th>
@@ -288,7 +330,7 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
                       <span>{r.person.name}</span>
                     </span>
                   </td>
-                  {ABSENCE_TYPES.map((ty) => (
+                  {PERSONAL_ABSENCE_TYPES.map((ty) => (
                     <td key={ty} className="num">
                       {r[ty] || '—'}
                     </td>
@@ -318,14 +360,18 @@ export function AbsenceDialog({ onClose, personId }: { onClose: () => void; pers
             </thead>
             <tbody>
               {ofYear.map((a) => {
-                const p = peopleById[a.personId];
+                const p = a.personId === null ? undefined : peopleById[a.personId];
                 return (
                   <tr key={a.id}>
                     <td>
-                      <span className="person-line">
-                        <Avatar person={p} size={18} />
-                        <span>{p?.name ?? '—'}</span>
-                      </span>
+                      {a.personId === null ? (
+                        <span>{t('absence.everyone')}</span>
+                      ) : (
+                        <span className="person-line">
+                          <Avatar person={p} size={18} />
+                          <span>{p?.name ?? '—'}</span>
+                        </span>
+                      )}
                     </td>
                     <td>{formatDate(a.start, lang)}</td>
                     <td>{formatDate(a.end, lang)}</td>

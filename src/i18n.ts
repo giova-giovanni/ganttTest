@@ -119,6 +119,12 @@ const it = {
   'absence.VACATION': 'Ferie',
   'absence.SICK': 'Malattia',
   'absence.OTHER': 'Altro',
+  'absence.CLOSURE': 'Chiusura / ponte aziendale',
+  'absence.closureShort': 'Chiusura',
+  'absence.everyone': 'Tutti i responsabili',
+  'absence.closureHint':
+    'Una chiusura aziendale (festività, ponte) vale per tutti: nei suoi giorni nessuno riceve carico e le ore passano agli altri giorni lavorativi. Nel Gantt compare come giorno bloccato.',
+  'absence.closureYear': 'Chiusure aziendali nel {y}: {d} gg lav. Non rientrano nel conteggio delle persone.',
 
   'archive.title': 'Archivio',
   'archive.hint': 'I progetti archiviati non compaiono in home e non generano carico di lavoro.',
@@ -774,6 +780,12 @@ const de: Record<keyof typeof it, string> = {
   'absence.VACATION': 'Urlaub',
   'absence.SICK': 'Krankheit',
   'absence.OTHER': 'Sonstiges',
+  'absence.CLOSURE': 'Betriebsschließung / Brückentag',
+  'absence.closureShort': 'Schließung',
+  'absence.everyone': 'Alle Verantwortlichen',
+  'absence.closureHint':
+    'Eine Betriebsschließung (Feiertag, Brückentag) gilt für alle: an diesen Tagen erhält niemand Last, die Stunden verschieben sich auf die übrigen Arbeitstage. Im Gantt erscheint sie als gesperrter Tag.',
+  'absence.closureYear': 'Betriebsschließungen im {y}: {d} AT. Sie zählen nicht zur Summe der Personen.',
 
   'archive.title': 'Archiv',
   'archive.hint': 'Archivierte Projekte erscheinen nicht auf der Startseite und erzeugen keine Auslastung.',

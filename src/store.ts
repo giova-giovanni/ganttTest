@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { Absence, AppData, ColKey, HomeLayout, Note, Page, Person, Status, TaskNode, UiState } from './types';
+import type { Absence, AbsenceType, AppData, ColKey, HomeLayout, Note, Page, Person, Status, TaskNode, UiState } from './types';
 import { STATUSES, ABSENCE_TYPES } from './types';
 import type { TKey } from './i18n';
 import { demoData } from './demo';
@@ -110,12 +110,14 @@ function normNode(n: Raw): TaskNode {
 function normAbsence(a: Raw): Absence {
   const s = isoOrNull(a.start);
   const e = isoOrNull(a.end) ?? s;
+  const type = ABSENCE_TYPES.includes(a.type as AbsenceType) ? (a.type as AbsenceType) : 'OTHER';
   return {
     id: str(a.id) || uid('a'),
-    personId: str(a.personId),
+    // la chiusura aziendale non ha una persona (vale per tutti), le altre assenze sì
+    personId: type === 'CLOSURE' ? null : str(a.personId),
     start: (s && e && e < s ? e : s) as string,
     end: (s && e && e < s ? s : e) as string,
-    type: ABSENCE_TYPES.includes(a.type as Absence['type']) ? (a.type as Absence['type']) : 'OTHER',
+    type,
     note: str(a.note),
   };
 }
@@ -158,7 +160,7 @@ export function migrate(data: Partial<AppData> | null | undefined): AppData {
   const absences: Absence[] = (Array.isArray(d.absences) ? d.absences : [])
     .filter(isObj)
     .map(normAbsence)
-    .filter((a) => a.start && a.end && peopleIds.has(a.personId));
+    .filter((a) => a.start && a.end && (a.personId === null || peopleIds.has(a.personId)));
 
   const now = new Date().toISOString();
   const notes: Note[] = (Array.isArray(d.notes) ? d.notes : [])
@@ -1991,13 +1993,15 @@ export function mergeData(incoming: Partial<AppData>): {
 
   // la stessa assenza (persona, date, motivo) aggiunta due volte non si raddoppia:
   // i giorni di ferie dell'anno si sommano assenza per assenza
-  const absKey = (a: Absence) => `${a.personId}|${a.start}|${a.end}|${a.type}`;
+  const absKey = (a: Absence) => `${a.personId ?? '*'}|${a.start}|${a.end}|${a.type}`;
   const knownAbsences = new Set(existing.absences.map(absKey));
   const newAbsences: Absence[] = [];
   const absencesAllowed = state.sync.mode === 'browser' || isAdmin();
   for (const a of absencesAllowed ? add.absences : []) {
-    const mapped: Absence = { ...a, id: uid('a'), personId: remap[a.personId] ?? a.personId };
-    if (!usedPersonIds.has(mapped.personId) || knownAbsences.has(absKey(mapped))) continue;
+    // una chiusura aziendale non ha persona da rimappare: vale per tutti
+    const personId = a.personId === null ? null : (remap[a.personId] ?? a.personId);
+    const mapped: Absence = { ...a, id: uid('a'), personId };
+    if ((personId !== null && !usedPersonIds.has(personId)) || knownAbsences.has(absKey(mapped))) continue;
     knownAbsences.add(absKey(mapped));
     newAbsences.push(mapped);
   }

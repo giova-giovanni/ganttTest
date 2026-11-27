@@ -38,7 +38,7 @@ export function labelOf(data: AppData, t: RecordKind, id: string): string {
   if (t === 'note') return data.notes.find((n) => n.id === id)?.title ?? '';
   const a = data.absences.find((x) => x.id === id);
   if (!a) return '';
-  const who = data.people.find((p) => p.id === a.personId)?.name ?? '';
+  const who = a.personId === null ? 'Chiusura aziendale' : (data.people.find((p) => p.id === a.personId)?.name ?? '');
   return `${who} ${a.start}…${a.end}`.trim();
 }
 
@@ -84,9 +84,10 @@ function repairRefs(data: AppData, remote: AppData): Array<{ t: RecordKind; id: 
     return [];
   });
   data.absences = data.absences.flatMap((a) => {
-    if (personIds.has(a.personId)) return [a];
+    // una chiusura aziendale non ha una persona a cui agganciarsi: resta sempre
+    if (a.personId === null || personIds.has(a.personId)) return [a];
     const was = remoteAbsence.get(a.id);
-    if (was && personIds.has(was.personId)) return [{ ...a, personId: was.personId }];
+    if (was && was.personId !== null && personIds.has(was.personId)) return [{ ...a, personId: was.personId }];
     gone.push({ t: 'absence', id: a.id });
     return [];
   });

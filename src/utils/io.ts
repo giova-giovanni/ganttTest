@@ -226,7 +226,7 @@ export function buildAbsencesCsv(data: AppData, lang: Lang): string {
   const sorted = [...data.absences].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
   for (const a of sorted) {
     rows.push([
-      names[a.personId] ?? '',
+      a.personId === null ? translate(lang, 'absence.everyone') : (names[a.personId] ?? ''),
       formatDate(a.start, lang),
       formatDate(a.end, lang),
       translate(lang, `absence.${a.type}` as TKey),
@@ -469,6 +469,11 @@ function parseStatus(raw: string): Status | null {
 const ABSENCE_WORDS: Record<string, AbsenceType> = {};
 (['ferie', 'urlaub', 'vacation', 'ferien', 'holiday'] as const).forEach((w) => (ABSENCE_WORDS[w] = 'VACATION'));
 (['malattia', 'krankheit', 'sick', 'krank', 'infortunio'] as const).forEach((w) => (ABSENCE_WORDS[w] = 'SICK'));
+// chiusure aziendali: anche con il nome dell’esportazione («Chiusura / ponte aziendale», «Betriebsschließung / Brückentag»)
+(['chiusura', 'ponte', 'closure', 'schliessung', 'betriebsschliessung', 'bruckentag', 'betriebsruhe'] as const).forEach(
+  (w) => (ABSENCE_WORDS[w] = 'CLOSURE'),
+);
+for (const lang of ['it', 'de'] as const) ABSENCE_WORDS[normalizeHeader(translate(lang, 'absence.CLOSURE'))] = 'CLOSURE';
 
 function parseAbsenceType(raw: string): AbsenceType {
   return ABSENCE_WORDS[normalizeHeader(raw)] ?? 'OTHER';
@@ -586,20 +591,27 @@ export function analyzeImport(text: string, filename: string, existing: AppData,
       const who = (r[index.assignee] ?? '').trim();
       const from = parseCsvDate(r[index.start] ?? '');
       const to = parseCsvDate(r[index.end] ?? '') ?? from;
-      if (!who || !from || !to) continue;
-      const key = who.toLowerCase();
-      let person = byName.get(key) ?? created.get(key);
-      if (!person) {
-        person = { id: uid('p'), name: who, role: '', color: pickColor(created.size), hoursPerDay: 8 };
-        created.set(key, person);
-        data.people.push(person);
+      const type = index.absenceType !== undefined ? parseAbsenceType(r[index.absenceType] ?? '') : 'OTHER';
+      // una chiusura aziendale vale per tutti: la colonna del responsabile non serve e non crea nessuna persona
+      const closure = type === 'CLOSURE';
+      if ((!closure && !who) || !from || !to) continue;
+      let personId: string | null = null;
+      if (!closure) {
+        const key = who.toLowerCase();
+        let person = byName.get(key) ?? created.get(key);
+        if (!person) {
+          person = { id: uid('p'), name: who, role: '', color: pickColor(created.size), hoursPerDay: 8 };
+          created.set(key, person);
+          data.people.push(person);
+        }
+        personId = person.id;
       }
       data.absences.push({
         id: uid('a'),
-        personId: person.id,
+        personId,
         start: from,
         end: to,
-        type: index.absenceType !== undefined ? parseAbsenceType(r[index.absenceType] ?? '') : 'OTHER',
+        type,
         note: index.notes !== undefined ? (r[index.notes] ?? '').trim() : '',
       });
     }

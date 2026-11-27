@@ -237,10 +237,11 @@ const RULES = {
     about: optional(text(2000)),
   },
   absence: {
-    personId: isId,
+    // null solo per le chiusure aziendali (vedi badRecord)
+    personId: orNull(isId),
     start: day,
     end: day,
-    type: oneOf('VACATION', 'SICK', 'OTHER'),
+    type: oneOf('VACATION', 'SICK', 'OTHER', 'CLOSURE'),
     note: text(1000),
   },
   note: {
@@ -258,6 +259,8 @@ const RULES = {
 function badRecord(t, rec) {
   if (!rec || typeof rec !== 'object' || !isId(rec.id)) return 'id';
   for (const [f, ok] of Object.entries(RULES[t])) if (!ok(rec[f])) return f;
+  // una chiusura aziendale non ha una persona (vale per tutti); ogni altra assenza ha una persona
+  if (t === 'absence' && (rec.personId === null) !== (rec.type === 'CLOSURE')) return 'personId';
   return null;
 }
 
@@ -287,6 +290,9 @@ export function invalidOps(ops) {
       if (!isId(o.id) || !o.set || typeof o.set !== 'object') return 'set: id o campi mancanti';
       const fields = Object.keys(o.set);
       if (!fields.length) return 'set: nessun campo';
+      // persona e motivo di un’assenza non si cambiano: si elimina e si reinserisce
+      // (così una chiusura resta sempre una chiusura e una persona resta una persona)
+      if (o.t === 'absence' && (fields.includes('personId') || fields.includes('type'))) return 'set: absence.personId/type';
       for (const f of fields) if (!(f in RULES[o.t]) || !RULES[o.t][f](o.set[f])) return `set: ${o.t}.${f}`;
       if (o.prev !== undefined && (typeof o.prev !== 'object' || o.prev === null)) return 'set: prev';
     } else if (o.op === 'del') {

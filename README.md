@@ -82,6 +82,7 @@ Per usare un browser già installato invece di scaricare Chromium: variabile d'a
 |---|---|
 | `tests/unit/tree.test.ts` | calcolo dei rami: inizio minimo, fine massima, somma ore, stato aggregato, avanzamento, sforamento, riparazione di dati corrotti |
 | `tests/unit/load.test.ts` | distribuzione delle ore sui giorni lavorativi, assenze, conflitti, attività annullate e progetti esclusi |
+| `tests/unit/chiusure.test.ts`, `tests/chiusure.test.mjs` | chiusure aziendali: carico per tutti (anche attività non assegnate), normalizzazione, unione tra utenti, regole di validazione, CSV andata e ritorno |
 | `tests/unit/dates.test.ts` | giorni lavorativi, settimane ISO, date scritte a mano |
 | `tests/unit/import-export.test.ts` | CSV in stile Excel IT/DE, esportazione → reimportazione, backup JSON, colonne in tedesco |
 | `tests/unit/data.test.ts` | coerenza dei dati di esempio e normalizzazione di dati sporchi |
@@ -127,6 +128,10 @@ temporanea; i test node:test usano cartelle temporanee: nessun test tocca `dati/
 
 - Un'attività con figli non si modifica: inizio = data minima, fine = data massima, ore = somma.
 - Le ore si spalmano sui **giorni lavorativi** (lun–ven) dell'attività, saltando le assenze del responsabile.
+- **Chiusure aziendali** (festività, ponti): in *Responsabili* → ferie e assenze, il motivo
+  **Chiusura / ponte aziendale** vale per tutti. Nei suoi giorni nessuno riceve carico, le ore passano agli
+  altri giorni lavorativi, e il Gantt la mostra come giorno bloccato. Non si assegna a una persona; nel
+  conteggio dell'anno compare a parte, fuori dai totali dei responsabili.
 - **100 %** = giornata piena (ore/giorno del responsabile, di norma 8 h).
 - Attività **annullate** e progetti **archiviati** restano fuori da date, ore e carico.
 

@@ -29,26 +29,52 @@ export interface LoadResult {
 /** personId -> giorno ISO -> assenza */
 export type AbsenceMap = Record<string, Record<string, Absence>>;
 
+/** chiave della mappa per le chiusure aziendali: valgono per tutti, anche per le attività non assegnate */
+export const ALL_PEOPLE = '__tutti__';
+
+/** giorni lavorativi coperti da un’assenza (gli estremi possono essere scambiati) */
+function absenceDays(a: Absence): string[] {
+  const from = a.start <= a.end ? a.start : a.end;
+  const to = a.start <= a.end ? a.end : a.start;
+  return workingDays(from, to);
+}
+
 export function buildAbsenceMap(absences: Absence[]): AbsenceMap {
   const map: AbsenceMap = {};
   for (const a of absences) {
     if (!a.start || !a.end) continue;
-    const from = a.start <= a.end ? a.start : a.end;
-    const to = a.start <= a.end ? a.end : a.start;
-    const byDay = (map[a.personId] ||= {});
-    for (const d of workingDays(from, to)) byDay[d] = a;
+    const byDay = (map[a.personId ?? ALL_PEOPLE] ||= {});
+    for (const d of absenceDays(a)) byDay[d] = a;
   }
   return map;
 }
 
+/** giorni di chiusura aziendale (validi per tutti) */
+export function closureDays(absences: Absence[]): Set<string> {
+  const out = new Set<string>();
+  for (const a of absences) {
+    if (a.personId !== null || !a.start || !a.end) continue;
+    for (const d of absenceDays(a)) out.add(d);
+  }
+  return out;
+}
+
+/**
+ * L’assenza che copre un giorno: quella della persona, oppure una chiusura aziendale
+ * (che vale anche per le attività non assegnate).
+ */
 export function isAbsent(absMap: AbsenceMap, personId: string | null | undefined, day: string): Absence | undefined {
-  if (!personId) return undefined;
-  return absMap[personId]?.[day];
+  return (personId ? absMap[personId]?.[day] : undefined) ?? absMap[ALL_PEOPLE]?.[day];
+}
+
+/** tutti i giorni in cui la persona non lavora: assenze proprie e chiusure aziendali */
+export function absentDays(absMap: AbsenceMap, personId: string): Set<string> {
+  return new Set([...Object.keys(absMap[personId] ?? {}), ...Object.keys(absMap[ALL_PEOPLE] ?? {})]);
 }
 
 /**
  * Distribuisce le ore previste di ogni attività FOGLIA sui suoi giorni lavorativi,
- * saltando i giorni di assenza del responsabile (ferie, malattia, ecc.).
+ * saltando i giorni di assenza del responsabile (ferie, malattia, ecc.) e le chiusure aziendali.
  * Le attività padre non vengono conteggiate (le loro ore sono la somma dei figli).
  * Le attività ANNULLATE e i progetti archiviati sono esclusi.
  */
