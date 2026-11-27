@@ -94,6 +94,7 @@ Per usare un browser già installato invece di scaricare Chromium: variabile d'a
 | `tests/server-security.test.mjs`, `tests/server-static.test.mjs` | intestazioni di sicurezza, nome del server (DNS rebinding), origine delle scritture, proxy, nessuna uscita dalla cartella dell'interfaccia |
 | `tests/shared-ops.test.mjs`, `tests/store-collab.test.mjs`, `tests/store-merge.test.mjs` | operazioni per record uguali nel browser e nel server; due utenti insieme: sovrascritture, record eliminati, annulla; unione di dati importati |
 | `tests/csv.test.mjs`, `tests/import.test.mjs`, `tests/export.test.mjs`, `tests/backup.test.mjs`, `tests/rules.test.mjs` | separatori e virgolette dei CSV, importazione di file della cartella dati e di gerarchie, perimetro dell'export, backup sul server, regole di calcolo |
+| `tests/personalizzazione.test.mjs` | colori del sito (leggibilità delle combinazioni pronte), colori dei progetti, profili e indirizzi delle foto, preferenze di ingrandimento |
 
 I test end-to-end avviano da soli un server statico e il server vero su una cartella dati
 temporanea; i test node:test usano cartelle temporanee: nessun test tocca `dati/`.
@@ -128,6 +129,27 @@ temporanea; i test node:test usano cartelle temporanee: nessun test tocca `dati/
 - Le ore si spalmano sui **giorni lavorativi** (lun–ven) dell'attività, saltando le assenze del responsabile.
 - **100 %** = giornata piena (ore/giorno del responsabile, di norma 8 h).
 - Attività **annullate** e progetti **archiviati** restano fuori da date, ore e carico.
+
+### Profili dei responsabili
+
+In **Responsabili** il pulsante **Profilo** (o un clic sul tondo) apre foto, ruolo, e-mail,
+telefono, presentazione, ore al giorno, colore e attività assegnate.
+
+- La foto è un **indirizzo web** (`https://…` o `http://…`) che porta direttamente a un'immagine:
+  tasto destro sull'immagine → *Copia indirizzo immagine*. Se non si carica restano le **iniziali**.
+- La foto non viene copiata nel programma: il sito che la ospita riceve una richiesta da ogni PC
+  che la mostra.
+- E-mail, telefono e foto li vede chiunque usi lo stesso archivio ed entrano nel CSV Responsabili.
+  Con *Salva su GitHub…* finiscono nel file dati: usare un repository **privato**.
+
+### Colori, ingrandimento e pagina iniziale
+
+| Cosa | Dove | Per chi vale |
+|---|---|---|
+| **Colori del sito** (combinazioni pronte o a mano, chiaro e scuro, colori degli stati) | ⚙ *Impostazioni* → **Colori** | solo per te, in quel browser |
+| **Colore di un progetto** | il quadratino accanto al progetto nella barra a sinistra, o **Colore** nella pagina Progetto | per tutti |
+| **Ingrandire** testo e dettagli di ogni pagina, righe e giorni del Gantt, menù | **Zoom** nella barra in alto | solo per te, in quel browser |
+| **Riquadri della Home** e loro grandezza | **⚙ Personalizza** (pannello a destra, con anteprima immediata) | solo per te, in quel browser |
 
 ### Importa / Esporta (⇅)
 
@@ -210,6 +232,7 @@ src/
   types.ts           modello dati e stati
   store.ts           stato globale, annulla/ripristina, coda dei salvataggi, modifiche altrui, migrazione
   i18n.ts            testi IT/DE
+  theme.ts           colori del sito: predefiniti (come in styles.css), combinazioni pronte, contrasto
   demo.ts            dati di esempio (inventati)
   utils/dates.ts     date, giorni lavorativi, settimane ISO
   utils/tree.ts      calcolo dei rami (date, ore, avanzamento) e riparazione dei dati

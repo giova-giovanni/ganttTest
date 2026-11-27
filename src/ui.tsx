@@ -1,9 +1,11 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { translate, type TKey } from './i18n';
 import type { Lang, Person, Status } from './types';
 import type { Level, Presence } from './utils/api';
 import { STATUS_COLORS } from './utils/tree';
 import { canEditState, useStore } from './store';
+import { textOn } from './theme';
 
 export function useT() {
   const { ui } = useStore();
@@ -115,9 +117,19 @@ export function IconRestore({ size = 13 }: { size?: number }) {
   );
 }
 
+export function IconZoom({ size = 14 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="6.8" cy="6.8" r="4.6" />
+      <path d="M10.3 10.3 14 14" strokeLinecap="round" />
+      <path d="M4.6 6.8h4.4M6.8 4.6V9" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function StatusChip({ status, lang }: { status: Status; lang: Lang }) {
   return (
-    <span className="chip" style={{ background: STATUS_COLORS[status] }}>
+    <span className="chip" style={{ background: STATUS_COLORS[status], color: textOn(STATUS_COLORS[status]) }}>
       {translate(lang, `status.${status}` as TKey)}
     </span>
   );
@@ -132,21 +144,39 @@ export function initials(name: string): string {
     .join('');
 }
 
+/**
+ * Tondo del responsabile: la foto del profilo se c'è e si carica, altrimenti le iniziali
+ * sul suo colore (il colore resta come cornice anche attorno alla foto).
+ */
 export function Avatar({ person, size = 22 }: { person?: Person; size?: number }) {
+  // si ricorda l'indirizzo che non si è caricato: cambiandolo si riprova
+  const [broken, setBroken] = React.useState('');
+  const box = { width: size, height: size, flexBasis: size, fontSize: Math.max(8, Math.round(size * 0.42)) };
   if (!person) {
     return (
-      <span className="avatar" style={{ background: '#9aa5b3', width: size, height: size, flexBasis: size }}>
+      <span className="avatar" style={{ background: '#6e788a', ...box }}>
         ?
       </span>
     );
   }
+  const photo = person.photo && person.photo !== broken ? person.photo : '';
   return (
     <span
-      className="avatar"
-      style={{ background: person.color, width: size, height: size, flexBasis: size }}
+      className={'avatar' + (photo ? ' photo' : '')}
+      style={{
+        background: person.color,
+        color: textOn(person.color),
+        boxShadow: photo ? `0 0 0 ${size > 40 ? 3 : 1.5}px ${person.color}` : undefined,
+        ...box,
+      }}
       title={person.name}
     >
-      {initials(person.name)}
+      {photo ? (
+        // il sito della foto non deve sapere da quale indirizzo di Gantt Planner arriva la richiesta
+        <img src={photo} alt="" referrerPolicy="no-referrer" draggable={false} onError={() => setBroken(photo)} />
+      ) : (
+        initials(person.name)
+      )}
     </span>
   );
 }
@@ -171,14 +201,21 @@ export function Modal({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
-  return (
+  // fuori dalla pagina: così la finestra segue l'ingrandimento scelto senza uscire dallo schermo
+  return createPortal(
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" style={maxWidth ? { maxWidth } : undefined}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        style={maxWidth ? { maxWidth: `min(${maxWidth}px, calc(96vw / var(--page-zoom, 1)))` } : undefined}
+      >
         <h3>{title}</h3>
         {children}
         {footer && <div className="row">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

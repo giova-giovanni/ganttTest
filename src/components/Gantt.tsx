@@ -11,6 +11,8 @@ import {
   todayISO,
 } from '../utils/dates';
 import { STATUS_COLORS } from '../utils/tree';
+import { textOn } from '../theme';
+import { pageZoom } from '../store';
 
 export interface GanttRow {
   id: string;
@@ -29,11 +31,16 @@ export type Scale = 'day' | 'week' | 'month';
 
 export const DAY_WIDTH: Record<Scale, number> = { day: 26, week: 10, month: 3.6 };
 
+/** larghezza di un giorno in pixel; `factor` è l'ingrandimento scelto dall'utente */
+export const dayWidth = (scale: Scale, factor = 1) => DAY_WIDTH[scale] * factor;
+
 interface Props {
   rows: GanttRow[];
   scale: Scale;
   lang: Lang;
   rowHeight: number;
+  /** ingrandimento della larghezza dei giorni (1 = normale) */
+  dayFactor?: number;
   selectedId?: string | null;
   onSelect?: (id: string) => void;
   onChangeDates: (id: string, start: string, end: string) => void;
@@ -79,6 +86,7 @@ export function Gantt({
   scale,
   lang,
   rowHeight,
+  dayFactor = 1,
   selectedId,
   onSelect,
   onChangeDates,
@@ -88,7 +96,7 @@ export function Gantt({
   paneStyle,
   blockedDays,
 }: Props) {
-  const dw = DAY_WIDTH[scale];
+  const dw = dayWidth(scale, dayFactor);
   const { start: rangeStart, days: totalDays } = React.useMemo(() => ganttRange(rows, scale), [rows, scale]);
   const width = totalDays * dw;
   const today = todayISO();
@@ -214,7 +222,8 @@ export function Gantt({
     const move = (e: PointerEvent) => {
       const cur = dragRef.current;
       if (!cur) return;
-      const delta = Math.round((e.clientX - cur.startX) / dw);
+      // il mouse si muove in pixel dello schermo, il grafico può essere ingrandito
+      const delta = Math.round((e.clientX - cur.startX) / (dw * pageZoom()));
       if (delta !== cur.delta) {
         const next = { ...cur, delta };
         dragRef.current = next;
@@ -378,7 +387,14 @@ export function Gantt({
                     {!row.summary && row.progress > 0 && (
                       <div className="progress" style={{ width: `${Math.round(row.progress * 100)}%` }} />
                     )}
-                    {w > 46 && <div className="bar-inner">{row.name}</div>}
+                    {w > 46 && (
+                      <div
+                        className={'bar-inner' + (textOn(color) === '#141b24' ? ' ink' : '')}
+                        style={{ color: textOn(color) }}
+                      >
+                        {row.name}
+                      </div>
+                    )}
                     {row.editable && (
                       <>
                         <div className="handle l" onPointerDown={(e) => beginDrag(e, row, 'start')} />

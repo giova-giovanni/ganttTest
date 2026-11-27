@@ -12,11 +12,13 @@ import { PrintDocument, type PrintOptions } from './components/PrintDocument';
 import { SyncBar } from './components/SyncBar';
 import { SettingsDialog } from './components/SettingsDialog';
 import { AccessDialog, LoginDialog } from './components/LoginDialog';
+import { ViewMenu } from './components/ViewMenu';
 import { canRedo, canUndo, redo, reportPresence, setUi, undo, useStore } from './store';
 import { IconLock, useT } from './ui';
 import { runAutoBackup, runAutoBackupIfDue } from './utils/backup';
 import { pageRule, usePrintWhenReady } from './utils/print';
 import { translate, type TKey } from './i18n';
+import { applyTheme } from './theme';
 import type { Lang, Page } from './types';
 
 export default function App() {
@@ -30,10 +32,17 @@ export default function App() {
   const [toast, setToast] = React.useState<string | null>(null);
   const [needsGrant, setNeedsGrant] = React.useState(false);
 
-  React.useEffect(() => {
-    document.documentElement.setAttribute('data-theme', ui.theme);
+  React.useLayoutEffect(() => {
+    applyTheme(document.documentElement, ui.theme, ui.colors);
     document.documentElement.lang = ui.lang;
-  }, [ui.theme, ui.lang]);
+  }, [ui.theme, ui.colors, ui.lang]);
+
+  // ingrandimento: le variabili servono a pagina, menù e finestre (vedi styles.css)
+  const pageZoomValue = ui.zoom[ui.page];
+  React.useLayoutEffect(() => {
+    document.documentElement.style.setProperty('--page-zoom', String(pageZoomValue));
+    document.documentElement.style.setProperty('--menu-zoom', String(ui.menuZoom));
+  }, [pageZoomValue, ui.menuZoom]);
 
   // gli altri vedono su quale pagina e su quale progetto si sta lavorando
   React.useEffect(() => {
@@ -138,11 +147,12 @@ export default function App() {
           ↷
         </button>
         <button className="tool" onClick={() => setShowPrint(true)} title={`${t('print.title')} (Ctrl+P)`}>
-          ⎙ {t('print.open')}
+          ⎙<span className="lbl">{t('print.open')}</span>
         </button>
         <button className="tool" onClick={() => setShowIo(true)} title={t('io.title')}>
-          ⇅ {t('io.title')}
+          ⇅<span className="lbl">{t('io.title')}</span>
         </button>
+        <ViewMenu />
         <button className="tool" onClick={() => setShowSettings(true)} title={t('settings.title')}>
           ⚙
         </button>
@@ -150,10 +160,10 @@ export default function App() {
           <button
             className={'tool level-btn' + (auth.level === 'admin' ? ' admin' : '')}
             onClick={() => setShowLogin(true)}
-            title={t('auth.title')}
+            title={`${t('auth.title')}: ${t(`auth.level.${auth.level}` as TKey)}`}
           >
             <IconLock open={auth.level === 'admin'} />
-            {t(`auth.level.${auth.level}` as TKey)}
+            <span className="lbl">{t(`auth.level.${auth.level}` as TKey)}</span>
           </button>
         )}
         <select

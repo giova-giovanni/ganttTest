@@ -27,12 +27,15 @@ import { translate, type TKey } from '../i18n';
 import { ABSENCE_COLORS, type AbsenceType } from '../types';
 import { AbsenceDialog } from '../components/AbsenceDialog';
 import { Gantt, type GanttRow, type Scale } from '../components/Gantt';
-import { ROW_H } from './ProjectPage';
+import { PersonProfile } from '../components/PersonProfile';
+import { textOn } from '../theme';
 
 type Gran = 'day' | 'week';
 
 export function LoadPage() {
-  const { data } = useStore();
+  const { data, ui } = useStore();
+  const { rowHeight, dayWidth: dayFactor } = ui.chart;
+  const [profile, setProfile] = React.useState<string | null>(null);
   const { t, lang } = useT();
   const today = todayISO();
   const [gran, setGran] = React.useState<Gran>('day');
@@ -329,7 +332,8 @@ export function LoadPage() {
                           }
                           style={{
                             background: pct > 0 && Number.isFinite(pct) && !allAbsent ? loadColor(pct) : undefined,
-                            color: pct > 0 && Number.isFinite(pct) && !allAbsent ? '#16202b' : undefined,
+                            // i colori del carico sono fissi (semaforo): la scritta si adatta a loro
+                            color: pct > 0 && Number.isFinite(pct) && !allAbsent ? textOn(loadColor(pct)) : undefined,
                             fontWeight: pct > 100 ? 700 : 400,
                           }}
                           title={title}
@@ -349,9 +353,7 @@ export function LoadPage() {
                     })}
                     <td className="tot">{fmtHours(stats.hours)} h</td>
                     <td className="tot">{Math.round(stats.avg)} %</td>
-                    <td className="tot" style={{ color: stats.peak > 100 ? '#d6453d' : undefined }}>
-                      {Math.round(stats.peak)} %
-                    </td>
+                    <td className={'tot' + (stats.peak > 100 ? ' over' : '')}>{Math.round(stats.peak)} %</td>
                   </tr>
                 );
               })}
@@ -405,6 +407,9 @@ export function LoadPage() {
           <span style={{ flex: 1 }} />
           {selPerson && (
             <>
+              <button className="btn sm" onClick={() => setProfile(selPerson)}>
+                {t('profile.title')}
+              </button>
               <button className="btn sm" onClick={() => setAbsOpen(true)}>
                 + {t('absence.open')}
               </button>
@@ -427,7 +432,9 @@ export function LoadPage() {
           </div>
         )}
         {selPerson && personRows.length > 0 && (
-          <div style={{ display: 'flex', height: 30 + personRows.length * ROW_H }}>
+          // l'altezza la decide il contenuto: con un'altezza fissa la barra di scorrimento
+          // orizzontale toglieva spazio e le barre non erano più allineate ai nomi
+          <div style={{ display: 'flex', '--row-h': `${rowHeight}px` } as React.CSSProperties}>
             <div style={{ width: 260, flex: '0 0 260px', borderRight: '1px solid var(--border-strong)' }}>
               <div
                 style={{ height: 30, borderBottom: '1px solid var(--border-strong)', background: 'var(--panel-2)' }}
@@ -436,8 +443,8 @@ export function LoadPage() {
                 <div
                   key={r.id}
                   style={{
-                    height: ROW_H,
-                    lineHeight: `${ROW_H}px`,
+                    height: rowHeight,
+                    lineHeight: `${rowHeight}px`,
                     padding: '0 8px',
                     borderBottom: '1px solid var(--border)',
                     overflow: 'hidden',
@@ -461,9 +468,11 @@ export function LoadPage() {
               rows={personRows}
               scale={miniScale}
               lang={lang}
-              rowHeight={ROW_H}
+              rowHeight={rowHeight}
+              dayFactor={dayFactor}
               onChangeDates={(id, start, end) => updateNode(id, { start, end })}
               blockedDays={personBlocked}
+              paneStyle={{ overflowY: 'hidden' }}
             />
           </div>
         )}
@@ -513,6 +522,17 @@ export function LoadPage() {
       )}
 
       {absOpen && <AbsenceDialog onClose={() => setAbsOpen(false)} personId={selPerson} />}
+      {profile && (
+        <PersonProfile
+          key={profile}
+          personId={profile}
+          onClose={() => setProfile(null)}
+          onAbsences={() => {
+            setProfile(null);
+            setAbsOpen(true);
+          }}
+        />
+      )}
 
       <div className="legend">
         <span>

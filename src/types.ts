@@ -21,6 +21,11 @@ export interface Person {
   color: string;
   /** Ore lavorative al giorno (default 8) */
   hoursPerDay: number;
+  /** profilo: indirizzo (http/https) di una foto, e contatti facoltativi */
+  photo?: string;
+  email?: string;
+  phone?: string;
+  about?: string;
 }
 
 /** Giorni in cui la persona non è disponibile (ferie, malattia, altro) */
@@ -53,6 +58,8 @@ export interface TaskNode {
   collapsed: boolean;
   /** solo sui progetti (nodi radice): progetto archiviato */
   archived: boolean;
+  /** solo sui progetti: colore scelto a mano; null = colore automatico */
+  color?: string | null;
 }
 
 /**
@@ -123,10 +130,43 @@ export interface HomeLayout {
   deadlineDays: number;
 }
 
+/** colori del sito scelti a mano («#rrggbb»); quelli mancanti restano predefiniti */
+export interface ColorSet {
+  accent?: string;
+  header?: string;
+  headerText?: string;
+  bg?: string;
+  panel?: string;
+  text?: string;
+  muted?: string;
+  today?: string;
+}
+
+export interface SiteColors {
+  light: ColorSet;
+  dark: ColorSet;
+  /** colori degli stati delle attività: valgono in entrambe le modalità */
+  status: Partial<Record<Status, string>>;
+}
+
+/** dimensioni del grafico Gantt (preferenza personale) */
+export interface ChartPrefs {
+  /** altezza di una riga di tabella e Gantt, in pixel */
+  rowHeight: number;
+  /** moltiplicatore della larghezza di un giorno (1 = normale) */
+  dayWidth: number;
+}
+
 export interface UiState {
   lang: Lang;
   theme: 'light' | 'dark';
   page: Page;
+  colors: SiteColors;
+  /** ingrandimento di testo e dettagli, pagina per pagina (1 = 100 %) */
+  zoom: Record<Page, number>;
+  /** ingrandimento di barra in alto e barra laterale */
+  menuZoom: number;
+  chart: ChartPrefs;
   selectedProjectId: string | null;
   scale: 'day' | 'week' | 'month';
   gridWidth: number;

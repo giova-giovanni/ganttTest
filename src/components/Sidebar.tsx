@@ -1,8 +1,10 @@
 import React from 'react';
-import { addProject, deleteNode, loadDemo, resetAll, setArchived, setUi, useStore } from '../store';
+import { addProject, deleteNode, loadDemo, resetAll, setArchived, setUi, updateNode, useStore } from '../store';
 import { IconArchive, IconRestore, PresenceDots, useCanAdmin, useCanEdit, useIsAdmin, useOthers, useT } from '../ui';
 import { computeAll, descendantIds, STATUS_COLORS } from '../utils/tree';
 import { formatDate } from '../utils/dates';
+import { projectColors } from '../utils/projectColors';
+import { ColorPicker } from './ColorPicker';
 import { translate } from '../i18n';
 import type { TaskNode } from '../types';
 
@@ -15,6 +17,7 @@ export function Sidebar() {
   const [showArchive, setShowArchive] = React.useState(false);
   const others = useOthers();
   const computed = React.useMemo(() => computeAll(data.nodes), [data.nodes]);
+  const colorOf = React.useMemo(() => projectColors(data.nodes), [data.nodes]);
   const roots = data.nodes.filter((n) => n.parentId === null);
   const active = roots.filter((n) => !n.archived);
   const archived = roots.filter((n) => n.archived);
@@ -34,6 +37,7 @@ export function Sidebar() {
       <div key={n.id} style={{ position: 'relative' }}>
         <button
           className={'proj' + (isActive ? ' active' : '') + (n.archived ? ' arch' : '')}
+          style={{ '--project-color': colorOf[n.id] } as React.CSSProperties}
           onClick={() => setUi({ page: 'project', selectedProjectId: n.id })}
           title={here.length ? t('presence.here', { users: here.map((p) => p.user).join(', ') }) : undefined}
         >
@@ -50,6 +54,15 @@ export function Sidebar() {
           </span>
         </button>
         <div className="proj-acts">
+          <ColorPicker
+            className="proj-act"
+            title={t('project.colorOf', { name: n.name })}
+            value={colorOf[n.id]}
+            isCustom={!!n.color}
+            disabled={!canEdit}
+            onChange={(color) => updateNode(n.id, { color })}
+            onReset={() => updateNode(n.id, { color: null })}
+          />
           <button
             className={'proj-act' + (!n.archived && finished ? ' suggest' : '')}
             title={n.archived ? t('btn.restore') : finished ? t('archive.suggest') : t('btn.archive')}

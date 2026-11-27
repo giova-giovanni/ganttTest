@@ -40,7 +40,8 @@ const PAGE_CSP = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  // le foto dei profili sono indirizzi web scelti dagli utenti (come in server/security.mjs)
+  "img-src 'self' data: blob: https: http:",
   "font-src 'self' data:",
   "connect-src 'self' https://api.github.com",
   "object-src 'none'",

@@ -13,7 +13,16 @@ nel browser, per esempio `https://gantt.azienda.local`.
 | Rete | un nome DNS interno (es. `gantt.azienda.local`) e, per HTTPS, un certificato |
 | Account | un account di servizio con i permessi minimi (consigliato `NETWORK SERVICE` o un utente di dominio dedicato) |
 
-Gantt Planner non scarica nulla e non si aggiorna da solo. Scrive solo nella cartella dati.
+Gantt Planner (il server) non scarica nulla e non si aggiorna da solo. Scrive solo nella cartella dati.
+
+**Foto dei profili**: se un utente mette nel profilo di un responsabile l'indirizzo di un'immagine,
+è il **browser di chi guarda** a scaricarla da quel sito (Gantt Planner non invia il proprio
+indirizzo). Per questo l'intestazione `Content-Security-Policy` ammette immagini `https:` e `http:`;
+script e connessioni restano solo dal server. Senza accesso a internet si vedono le iniziali. Se le
+regole aziendali non permettono immagini esterne, in `server/security.mjs` (e in `vite.config.ts`
+per la versione su GitHub Pages) si può sostituire `https: http:` con il nome di un server interno
+(es. `https://foto.azienda.local`). Con Gantt Planner in HTTPS usare immagini in HTTPS: quelle in
+HTTP il browser le blocca o le richiede in HTTPS.
 
 ## 2. Installazione (una volta)
 
@@ -156,6 +165,9 @@ Ripristino: in Gantt Planner, *Importa* → trascina un file di `backups\`, `ver
 1. Ferma il servizio: `Stop-ScheduledTask GanttPlanner`.
 2. Sostituisci i file del programma (mai la cartella dati), poi `npm ci` e `npm run build`.
 3. Riavvia: `Start-ScheduledTask GanttPlanner`. Gli utenti rientrano con il proprio nome e la propria password.
+
+Il riavvio serve sempre: ricompilare non basta, perché server e browser devono conoscere gli stessi
+campi dei dati. Dopo l'aggiornamento chi aveva Gantt Planner già aperto ricarica la pagina (`F5`).
 
 ## 9. Se qualcosa non va
 
